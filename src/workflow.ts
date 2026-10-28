@@ -21,7 +21,7 @@ export function researchGraph(cfg:AppConfig,store:Store,gateway:ModelGateway) {
     .addNode('collect',async(s:S)=>{
       const c=store.competition(s.competitionId); await saveSource(store,s.competitionId,c.url,'entry');
       const queries=[`${c.title} 比赛 通知 规程 参赛要求`,`${c.title} 往届 获奖名单 作品`,`${c.title} 获奖作品 展示 作者 学校`];
-      for(const q of queries){const results=await searchLogged(store,gateway,s.competitionId,q); for(const r of results.slice(0,3)){try{await saveSource(store,s.competitionId,r.url,'search',r.title);}catch{/* 搜索记录和缺口留存 */}}}
+      const results=await Promise.all(queries.map(q=>searchLogged(store,gateway,s.competitionId,q)));await Promise.all(results.flatMap(group=>group.slice(0,3).map(r=>saveSource(store,s.competitionId,r.url,'search',r.title).catch(()=>null))));
       // 查找赛事页面中真实存在的附件或历届链接，控制数量。
       try {const page=await fetchDocument(c.url); for(const link of page.links.filter(x=>/附件|规程|往届|获奖|作品|提交|通知|原文|赛题|下载|模板/.test(x.title)).slice(0,8)){try{await saveSource(store,s.competitionId,link.url,'linked',link.title);}catch{}}}catch{}
       return {};
@@ -31,21 +31,23 @@ export function researchGraph(cfg:AppConfig,store:Store,gateway:ModelGateway) {
       for(let round=1;round<=2;round++){const evidence=store.evidence(s.competitionId).map(e=>({url:e.url,title:e.title,text:e.text.slice(0,8000)}));
         const raw=await gateway.generate('reviewer',`${textGuard}\n根据以下证据提出最多三个具体的后续搜索词，用于寻找往届作品、获奖团队、作品展示或原始规则附件。当前第 ${round} 轮，已经搜索 ${JSON.stringify([...used])}，不要重复。沿获奖名单→作品名称/作者→学校报道→公开代码/演示追查，有确切名称或团队线索时必须追查其作品；找不到线索时搜索往届获奖名单。只输出 JSON 字符串数组，不要虚构名称；若已无必要的查询输出空数组。赛事：${c.title}\n证据：${JSON.stringify(evidence)}`);
         const parsed=parseJSON(raw);if(!Array.isArray(parsed)||!parsed.every(x=>typeof x==='string'))throw Error('后续研究搜索词必须为 JSON 字符串数组');const queries=parsed.filter(x=>x.trim()&&!used.has(x)).slice(0,3);if(!queries.length)break;
-        for(const q of queries){used.add(q);const results=await searchLogged(store,gateway,s.competitionId,q);for(const r of results.slice(0,2)){try{await saveSource(store,s.competitionId,r.url,'followup',r.title);}catch{}}}
+        queries.forEach(q=>used.add(q));const results=await Promise.all(queries.map(q=>searchLogged(store,gateway,s.competitionId,q)));await Promise.all(results.flatMap(group=>group.slice(0,2).map(r=>saveSource(store,s.competitionId,r.url,'followup',r.title).catch(()=>null))));
       }return {};
     })
     .addNode('analyze',async(s:S)=>{
       const c=store.competition(s.competitionId); const sources=store.evidence(s.competitionId).map(e=>({url:e.url,title:e.title,kind:e.kind,text:e.text.slice(0,18000)}));
-      const prompt=`${textGuard}\n读取来源并只输出一个 JSON 对象，字段必须为 title, edition, eligibility, deadline, ai_rules, scoring, deliverables, requires_idea, missing, citations。未知值用 null，不要猜测；冲突与未知记在 missing。deliverables 是数组，每项包含 type, quantity, formats(数组), limits(数组), naming, attachments(数组), submission, official_template；没有明确规定的项用 null 或空数组；不要制定模板。citations 为数组，每项包含 field、url、quote，其中 quote 必须逐字摘自该 url 的来源正文；每项已知规则尽量提供引用。requires_idea 对翻译等给定材料的任务为 false，不确定为 null。赛事：${c.title}\n用户情况：${JSON.stringify(cfg.profile)}\n来源：${JSON.stringify(sources)}`;
+      const prompt=`${textGuard}\n读取来源并只输出一个 JSON 对象，字段必须为 title, edition, eligibility, deadline, ai_rules, scoring, deliverables, requires_idea, missing, citations, research。未知值用 null，不要猜测；冲突与未知记在 missing。deliverables 是数组，每项包含 type, quantity, formats(数组), limits(数组), naming, attachments(数组), submission, official_template；没有明确规定的项用 null 或空数组；不要制定模板。citations 为数组，每项包含 field、url、quote，其中 quote 必须逐字摘自该 url 的来源正文；每项已知规则尽量提供引用。research 必须为 {past_winners:[],past_works:[],judging:[],missing:[]}，前三项为 {url,quote,title} 数组；仅当找到真实获奖名单时填 past_winners，仅找到实际公开作品、代码或展示时填 past_works，仅有奖项或标题不足以证明完整作品；评分依据填 judging。quote 必须逐字来自该 URL 正文；未找到就留空，不要猜测。requires_idea 对翻译等给定材料的任务为 false，不确定为 null。赛事：${c.title}\n用户情况：${JSON.stringify(cfg.profile)}\n来源：${JSON.stringify(sources)}`;
       const brief=Brief.parse(parseJSON(await gateway.generate('reviewer',prompt))); const known=store.evidence(s.competitionId); const normalized=(x:string)=>x.replace(/\s+/g,' ').trim();
       const valid=brief.citations.filter(citation=>known.some(e=>e.url===citation.url && citation.quote.trim().length>0 && normalized(e.text).includes(normalized(citation.quote))));
       if(valid.length!==brief.citations.length) brief.missing.push('部分引用无法在实际来源正文中核对，已剔除'); brief.citations=valid;
+      for(const key of ['past_winners','past_works','judging'] as const){const before=brief.research[key].length;brief.research[key]=brief.research[key].filter(proof=>known.some(e=>e.url===proof.url&&proof.quote.trim().length>=5&&normalized(e.text).includes(normalized(proof.quote))));if(before!==brief.research[key].length)brief.research.missing.push(`${key} 部分证据无法逐字核对，已剔除`);}
+      if(!brief.research.past_winners.length)brief.research.missing.push('尚未找到可核对的往届获奖名单');if(!brief.research.past_works.length)brief.research.missing.push('尚未找到可核对的往届完整作品或展示；不能判断创新性');if(!brief.research.judging.length)brief.research.missing.push('尚未找到可核对的评分细则');
       for(const field of ['eligibility','deadline','ai_rules','scoring']) if(brief[field as keyof typeof brief] && !valid.some(x=>x.field===field)) brief.missing.push(`${field} 缺少可核对的原文引用`);
-      store.setBrief(s.competitionId,brief); return {};
+      store.setBrief(s.competitionId,brief);await save(cfg,store,s.jobId,'research-coverage.json',JSON.stringify({coverage:brief.research,searches:store.searches(s.competitionId),source_attempts:store.sourceAttempts(s.competitionId)},null,2),'research_coverage',null); return {};
     })
     .addNode('writeReport',async(s:S)=>{
       const c=store.competition(s.competitionId); const evidence=store.evidence(s.competitionId).map(({url,title,kind,text})=>({url,title,kind,excerpt:text.slice(0,12000)})); const searches=store.searches(s.competitionId);
-      const report=await gateway.generate('writer',`${textGuard}\n依据以下数据撰写中文赛事研究报告。对每项可核实事实标注来源 URL。明确区分当届规则、历届获奖名单与公开完整作品；如果证据不足或无公开作品，明确说明，不得推断其不存在或捏造。指出资格、截止日期、评分、AI规则、交付要求、冲突及资料缺口。\n档案：${JSON.stringify(c.brief)}\n证据：${JSON.stringify(evidence)}\n检索记录：${JSON.stringify(searches)}`);
+      const report=await gateway.generate('writer',`${textGuard}\n依据以下数据撰写中文赛事研究报告。对每项可核实事实标注来源 URL。明确区分当届规则、历届获奖名单与公开完整作品；如果证据不足或无公开作品，明确说明，不得推断其不存在或捏造。指出资格、截止日期、评分、AI规则、交付要求、冲突及资料缺口。\n档案：${JSON.stringify(c.brief)}\n证据：${JSON.stringify(evidence)}\n检索记录：${JSON.stringify(searches)}\n来源访问记录：${JSON.stringify(store.sourceAttempts(s.competitionId))}`);
       const path=await save(cfg,store,s.jobId,'research.md',report,'research_report','gemini'); return {report,outputPath:path};
     })
     .addEdge(START,'collect').addEdge('collect','followup').addEdge('followup','analyze').addEdge('analyze','writeReport').addEdge('writeReport',END);

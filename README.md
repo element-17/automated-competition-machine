@@ -25,7 +25,9 @@ node dist/cli.js auto --query '大学生 设计大赛 作品征集' --limit 3
 node dist/cli.js auto --url 'https://主办方公告地址' --budget 40
 ```
 
-自动路线支持文本、DOCX、文字型 PDF、PPTX、PNG/JPG、网页原型 HTML/ZIP，按当届交付清单选择，不使用固定作品模板。图片需要所配置的图片模型可用；软件原型由 OpenCode 代码 Agent 制作，目前只执行文件与 JavaScript 静态检查，尚未运行交互测试。PPT 的自动检查覆盖页数、边界和部分文本重叠，尚未实现渲染后的视觉验收。格式不支持、原题/真实数据缺失或官方模板无法识别时会保留缺口，不会伪造材料。含 `{字段}` 的官方 DOCX/PPTX 模板会尝试保留版式并填写；复杂表格、空白横线等模板尚不保证自动填写。
+自动路线支持文本、DOCX、文字型 PDF、PPTX、PNG/JPG、网页原型 HTML/ZIP，按当届交付清单选择，不使用固定作品模板。图片需要所配置的图片模型可用；软件原型由 OpenCode 代码 Agent 制作，目前只执行文件与 JavaScript 静态检查，尚未运行交互测试。PPT 会检查页数、边界和部分文本重叠，并尝试使用 LibreOffice 和 Poppler 渲染逐页预览；视觉内容的自动复核尚未实现，结果会标记为待检查。格式不支持、原题/真实数据缺失或官方模板无法识别时会保留缺口，不会伪造材料。含 `{字段}` 的官方 DOCX/PPTX 模板会尝试保留版式并填写；复杂表格、空白横线等模板尚不保证自动填写。
+
+选题类赛事并发生成三个独立方向，再为每个方向检索相似作品，交给第二模型结合来源比较。任务目录的 `concept-diversity.json` 是词面重复提示，不代表原创性证明；`concept-review.json` 保存比较结果。`research-coverage.json` 保存搜索与来源访问记录，并区分已核对的往届获奖名单、公开作品和评分细则；资料不足会列为待核实。可在配置文件的 `sources` 中添加赛事资讯页，`auto` 会读取页面中的赛事链接并同时执行搜索。
 
 全网赛事与参赛要求经常变化，搜索结果可能漏掉赛事或包含过期公告；不能保证覆盖所有比赛。系统不自动报名、支付或提交作品。
 
@@ -34,6 +36,7 @@ node dist/cli.js auto --url 'https://主办方公告地址' --budget 40
 - Node.js 24；项目依赖中已固定 OpenCode CLI 2.2.0，无需另行全局安装。
 - OpenCode 服务端能够访问 Gemini 和 Claude API，分别通过 `GOOGLE_GENERATIVE_AI_API_KEY` 及 `ANTHROPIC_API_KEY` 配置。具体凭据方式参见 [OpenCode providers](https://opencode.ai/v2/docs/providers/)。图片模型可在配置的 `image` 字段更改。
 - 联网搜索默认复用 OpenCode 的 `tinyfish` 提供商；可在配置文件中改成 OpenCode 支持的其他提供商并配置对应密钥。
+- 本地 PPT 预览需要安装 LibreOffice（`soffice`）和 Poppler（`pdftoppm`），可用 `COMPETE_SOFFICE` 和 `COMPETE_PDFTOPPM` 指定可执行文件路径；缺少时任务会记录缺口。容器镜像包含这两个工具及中文字体。
 
 ```powershell
 npm ci

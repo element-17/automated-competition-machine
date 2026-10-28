@@ -1,7 +1,9 @@
 import { z } from 'zod';
 
 export const Deliverable = z.object({ type: z.string(), quantity: z.string().nullable().default(null), formats: z.array(z.string()).default([]), limits: z.array(z.string()).default([]), naming: z.string().nullable().default(null), attachments: z.array(z.string()).default([]), submission: z.string().nullable().default(null), official_template: z.string().nullable().default(null) });
-export const Brief = z.object({ title: z.string(), edition: z.string().nullable().default(null), eligibility: z.string().nullable().default(null), deadline: z.string().nullable().default(null), ai_rules: z.string().nullable().default(null), scoring: z.string().nullable().default(null), deliverables: z.array(Deliverable).default([]), requires_idea: z.boolean().nullable().default(null), missing: z.array(z.string()).default([]), citations: z.array(z.object({field:z.string(),url:z.string(),quote:z.string()})).default([]) });
+export const ResearchProof = z.object({url:z.string(),quote:z.string(),title:z.string().default('')});
+export const ResearchCoverage = z.object({past_winners:z.array(ResearchProof).default([]),past_works:z.array(ResearchProof).default([]),judging:z.array(ResearchProof).default([]),missing:z.array(z.string()).default([])});
+export const Brief = z.object({ title: z.string(), edition: z.string().nullable().default(null), eligibility: z.string().nullable().default(null), deadline: z.string().nullable().default(null), ai_rules: z.string().nullable().default(null), scoring: z.string().nullable().default(null), deliverables: z.array(Deliverable).default([]), requires_idea: z.boolean().nullable().default(null), missing: z.array(z.string()).default([]), citations: z.array(z.object({field:z.string(),url:z.string(),quote:z.string()})).default([]),research:ResearchCoverage.default({past_winners:[],past_works:[],judging:[],missing:[]}) });
 export type Brief = z.infer<typeof Brief>;
 export type Evidence = { id: string; competitionId: string; url: string; title: string; text: string; fetchedAt: string; kind: string };
 export type ModelRole = 'writer' | 'reviewer';
