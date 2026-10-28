@@ -14,9 +14,25 @@ $env:ANTHROPIC_API_KEY = '<你的 Claude API 密钥>'
 node dist/cli.js auto
 ```
 
-本地 OpenCode 未启动时，`auto` 会使用项目内安装的 OpenCode 自动启动服务，并在结束时关闭。默认从多个类别搜索，每次处理 3 场，每场最多预留 30 次模型调用；可通过 `--limit 5 --budget 40` 修改。重复运行时会跳过已完成任务，并恢复未完成任务；需要重新处理时使用 `--redo`。这个次数限制并不等同于费用上限；OpenCode 可能在单次模型请求内部重试。
+本地 OpenCode 未启动时，`auto` 会使用项目内安装的 OpenCode 自动启动服务，并在结束时关闭。默认从多个类别搜索，将发现的赛事加入持久队列，再按入队顺序逐个处理，默认每次最多处理 3 场，每场最多预留 30 次模型调用；可通过 `--limit 5 --budget 40` 修改。已经完成的赛事不会重复入队；需要重新处理时使用 `--redo`。这个次数限制并不等同于费用上限；OpenCode 可能在单次模型请求内部重试。
 
-每个任务的输出、研究来源、方案和待确认项保存在 `data/jobs/<任务ID>`；`result.json` 的 `ready_for_review` 表示文件已生成且自动检查未发现待处理项，**不是获奖或符合所有参赛规则的保证**。`needs_review` 则列出尚未完成或需要核实的内容。`node dist/cli.js status <任务ID>` 查看状态；失败后使用 `node dist/cli.js resume <任务ID> --budget 40` 恢复。
+## 赛事队列
+
+队列保存在数据目录的 `competition.sqlite`，重启进程或服务器不会丢失。`scan` 只发现并入队，`work` 不重新搜索，按先进先出顺序处理已入队赛事；`auto` 将发现和处理组合起来。每场赛事的任务、结果及 LangGraph 检查点也保存在数据目录中。
+
+```powershell
+node dist/cli.js scan --query '大学生 设计大赛 作品征集'
+node dist/cli.js queue
+node dist/cli.js work --limit 3 --budget 40
+node dist/cli.js retry                  # 将所有失败项重新排队
+node dist/cli.js retry <赛事ID>         # 仅重新排队一个失败项
+node dist/cli.js enqueue --all          # 将以前发现的赛事加入队列
+node dist/cli.js enqueue <赛事ID> --redo # 重新处理一场已完成赛事
+```
+
+队列状态为 `queued`（等待）、`processing`（处理中）、`completed`（流程已结束，不等于作品通过验收）或 `failed`（失败）。失败项保留错误和任务 ID，`retry` 后 `work` 使用原任务检查点继续；完成后的作品与待核实事项请查看 `status <任务ID>`。发现模型服务不可用时，尚未领取的赛事会继续留在队列。队列使用 SQLite 租约保证同一数据目录同时只有一个处理进程；若进程被强制终止，最多等约 5 分钟租约到期后再运行 `work`，处理中项目会重新排队并尝试恢复。正常运行期间租约会自动续期。
+
+每个任务的输出、研究来源、方案和待确认项保存在 `data/jobs/<任务ID>`；`result.json` 的 `ready_for_review` 表示文件已生成且自动检查未发现待处理项，**不是获奖或符合所有参赛规则的保证**。`needs_review` 则列出尚未完成或需要核实的内容。`node dist/cli.js status <任务ID>` 查看状态；队列任务失败后用 `retry <赛事ID>` 和 `work --budget 40` 恢复，非队列任务可使用 `resume <任务ID> --budget 40`。
 
 可以限定搜索方向或指定单条公告：
 
