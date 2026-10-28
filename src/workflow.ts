@@ -19,18 +19,20 @@ async function save(cfg:AppConfig,store:Store,id:string,name:string,content:stri
 export function researchGraph(cfg:AppConfig,store:Store,gateway:ModelGateway) {
   const builder=new StateGraph(State)
     .addNode('collect',async(s:S)=>{
-      const c=store.competition(s.competitionId); await saveSource(store,s.competitionId,c.url,'official');
+      const c=store.competition(s.competitionId); await saveSource(store,s.competitionId,c.url,'entry');
       const queries=[`${c.title} 比赛 通知 规程 参赛要求`,`${c.title} 往届 获奖名单 作品`,`${c.title} 获奖作品 展示 作者 学校`];
-      for(const q of queries){const results=await searchLogged(store,gateway,s.competitionId,q); for(const r of results.slice(0,3)){try{await saveSource(store,s.competitionId,r.url,'search');}catch{/* 搜索记录和缺口留存 */}}}
+      for(const q of queries){const results=await searchLogged(store,gateway,s.competitionId,q); for(const r of results.slice(0,3)){try{await saveSource(store,s.competitionId,r.url,'search',r.title);}catch{/* 搜索记录和缺口留存 */}}}
       // 查找赛事页面中真实存在的附件或历届链接，控制数量。
-      try {const page=await fetchDocument(c.url); for(const link of page.links.filter(x=>/附件|规程|往届|获奖|作品|提交|通知/.test(x.title)).slice(0,5)){try{await saveSource(store,s.competitionId,link.url,'linked');}catch{}}}catch{}
+      try {const page=await fetchDocument(c.url); for(const link of page.links.filter(x=>/附件|规程|往届|获奖|作品|提交|通知|原文|赛题|下载|模板/.test(x.title)).slice(0,8)){try{await saveSource(store,s.competitionId,link.url,'linked',link.title);}catch{}}}catch{}
       return {};
     })
     .addNode('followup',async(s:S)=>{
-      const c=store.competition(s.competitionId); const evidence=store.evidence(s.competitionId).map(e=>({url:e.url,title:e.title,text:e.text.slice(0,8000)}));
-      const raw=await gateway.generate('reviewer',`${textGuard}\n根据以下证据提出最多三个具体的后续搜索词，用于寻找往届作品、获奖团队、作品展示或原始规则附件。优先用已有真实作品名称或团队线索展开；不知则使用赛事名称和往届查询。只输出 JSON 字符串数组，不要虚构名称。赛事：${c.title}\n证据：${JSON.stringify(evidence)}`);
-      const parsed=parseJSON(raw); if(!Array.isArray(parsed)||!parsed.every(x=>typeof x==='string')) throw Error('后续研究搜索词必须为 JSON 字符串数组');
-      for(const q of parsed.slice(0,3)){const results=await searchLogged(store,gateway,s.competitionId,q); for(const r of results.slice(0,2)){try{await saveSource(store,s.competitionId,r.url,'followup');}catch{}}} return {};
+      const c=store.competition(s.competitionId);const used=new Set((store.searches(s.competitionId) as {query:string}[]).map(x=>x.query));
+      for(let round=1;round<=2;round++){const evidence=store.evidence(s.competitionId).map(e=>({url:e.url,title:e.title,text:e.text.slice(0,8000)}));
+        const raw=await gateway.generate('reviewer',`${textGuard}\n根据以下证据提出最多三个具体的后续搜索词，用于寻找往届作品、获奖团队、作品展示或原始规则附件。当前第 ${round} 轮，已经搜索 ${JSON.stringify([...used])}，不要重复。沿获奖名单→作品名称/作者→学校报道→公开代码/演示追查，有确切名称或团队线索时必须追查其作品；找不到线索时搜索往届获奖名单。只输出 JSON 字符串数组，不要虚构名称；若已无必要的查询输出空数组。赛事：${c.title}\n证据：${JSON.stringify(evidence)}`);
+        const parsed=parseJSON(raw);if(!Array.isArray(parsed)||!parsed.every(x=>typeof x==='string'))throw Error('后续研究搜索词必须为 JSON 字符串数组');const queries=parsed.filter(x=>x.trim()&&!used.has(x)).slice(0,3);if(!queries.length)break;
+        for(const q of queries){used.add(q);const results=await searchLogged(store,gateway,s.competitionId,q);for(const r of results.slice(0,2)){try{await saveSource(store,s.competitionId,r.url,'followup',r.title);}catch{}}}
+      }return {};
     })
     .addNode('analyze',async(s:S)=>{
       const c=store.competition(s.competitionId); const sources=store.evidence(s.competitionId).map(e=>({url:e.url,title:e.title,kind:e.kind,text:e.text.slice(0,18000)}));

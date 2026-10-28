@@ -7,6 +7,7 @@ const Config = z.object({
   opencodeUrl: z.string().url().default('http://127.0.0.1:4096'),
   writer: z.object({ providerID: z.literal('google'), id: z.string().regex(/^gemini[-.]/i, '写作模型必须明确为 Gemini') }),
   reviewer: z.object({ providerID: z.string().min(1), id: z.string().min(1) }),
+  image: z.object({ providerID: z.string().min(1), id: z.string().min(1) }).default({providerID:'google',id:'gemini-2.5-flash-image'}),
   maxCalls: z.number().int().min(1).default(12),
   searchProvider: z.string().min(1).default('tinyfish'),
   sources: z.array(z.string().url()).default([]),

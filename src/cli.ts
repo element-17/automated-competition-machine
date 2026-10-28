@@ -6,6 +6,8 @@ import { Store } from './store.js';
 import { OpenCodeGateway, authHeaders } from './opencode.js';
 import { fetchDocument, normalizeUrl, searchLogged } from './sources.js';
 import { runJob } from './workflow.js';
+import { discoverCompetitions, runAutomatic } from './autonomous.js';
+import { ensureService } from './service.js';
 
 const program=new Command();
 program.name('compete').description('高校竞赛发现、研究和作品制作 CLI').version('0.1.0').option('-c, --config <path>','配置文件路径');
@@ -35,6 +37,15 @@ program.command('produce').description('制作翻译或报告作品').argument('
 });
 program.command('status').description('查看任务及已保存产物').argument('<job-id>').action(id=>{const {store}=context();try{print({job:store.job(id),artifacts:store.artifacts(id)});}finally{store.close();}});
 program.command('resume').description('从持久检查点恢复失败任务').argument('<job-id>').option('--budget <calls>','调整总模型调用次数上限',Number).action(async(id,opts)=>{
-  const {cfg,store}=context();try{if(opts.budget!==undefined)store.setBudget(id,opts.budget); const result=await runJob(cfg,store,new OpenCodeGateway(cfg,store,id),id,true); print({jobId:id,outputPath:result.outputPath});}finally{store.close();}
+  const {cfg,store}=context();let stop=()=>{};try{if(opts.budget!==undefined)store.setBudget(id,opts.budget); const job=store.job(id);stop=await ensureService(cfg);const gateway=new OpenCodeGateway(cfg,store,id); const result=job.kind==='automatic'?await runAutomatic(cfg,store,gateway,id,true):await runJob(cfg,store,gateway,id,true);print({jobId:id,result});}finally{stop();store.close();}
+});
+program.command('auto').description('自动发现赛事、追查往届作品、比较方案并制作可支持的交付物').option('-q, --query <query>','限定搜索方向；不指定时覆盖多种赛事').option('-u, --url <url>','直接处理指定公告；不指定时自动发现').option('--limit <number>','本次最多处理的赛事数',Number,3).option('--budget <calls>','每场赛事最多模型调用次数',Number,30).option('--redo','重新处理已完成的赛事').action(async(opts)=>{
+ const {cfg,store}=context();let stop=()=>{};try{if(!Number.isInteger(opts.limit)||opts.limit<1||!Number.isInteger(opts.budget)||opts.budget<1)throw Error('limit 和 budget 必须为正整数');stop=await ensureService(cfg);const discoveryGateway=new OpenCodeGateway(cfg,store);let ids:string[];
+ if(opts.url){const page=await fetchDocument(opts.url);ids=[store.addCompetition(normalizeUrl(opts.url),page.title)];}else ids=await discoverCompetitions(store,discoveryGateway,opts.query);
+ if(!ids.length)throw Error('未发现赛事；请检查搜索服务或稍后重试');const todo=ids.filter(id=>opts.redo||store.latestJob(id,'automatic')?.state!=='completed');console.log(`发现 ${ids.length} 个赛事候选，其中 ${todo.length} 个尚未完成；本次处理前 ${Math.min(opts.limit,todo.length)} 个。候选并不保证仍可报名。`);if(!todo.length){print({discovered:ids.length,processed:[],note:'已处理过所有候选；使用 --redo 可重新处理'});return;}
+ const client=OpenCode.make({baseUrl:cfg.opencodeUrl,headers:authHeaders()});const models=await client.model.list(undefined,{signal:AbortSignal.timeout(10000)});const missing=[cfg.writer,cfg.reviewer].filter(m=>!models.data.some(x=>x.providerID===m.providerID&&x.id===m.id));if(missing.length)throw Error(`赛事候选已保存，但模型不可用：${missing.map(x=>`${x.providerID}/${x.id}`).join('、')}。请在启动本命令前配置 GOOGLE_GENERATIVE_AI_API_KEY 和 ANTHROPIC_API_KEY，或在 config/config.json 选择账号可用模型。`);
+ const results=[];for(const competitionId of todo.slice(0,opts.limit)){const old=opts.redo?null:store.latestJob(competitionId,'automatic');const jobId=old?.id||store.createJob(competitionId,'automatic',{},opts.budget);if(old&&opts.budget>old.maxCalls)store.setBudget(jobId,opts.budget);console.log(`${old?'恢复':'开始'} ${store.competition(competitionId).title}；任务 ${jobId}`);try{const r=await runAutomatic(cfg,store,new OpenCodeGateway(cfg,store,jobId),jobId,!!old&&old.state!=='pending');results.push({competitionId,jobId,outputs:r.outputs,gaps:r.gaps,gate:r.gate});}catch(e){const error=e instanceof Error?e.message:String(e);results.push({competitionId,jobId,error});console.error(`任务 ${jobId} 未完成：${error}`);if(/模型.*调用失败|Gemini 写作.*失败|第二模型.*失败/.test(error))break;}}
+ print({discovered:ids.length,processed:results});if(results.some(x=>'error'in x))process.exitCode=1;
+ }finally{stop();store.close();}
 });
 program.parseAsync().catch(e=>{console.error(`错误：${e instanceof Error?e.message:String(e)}`);process.exitCode=1;});
