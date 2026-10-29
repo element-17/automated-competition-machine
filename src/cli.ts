@@ -7,9 +7,12 @@ import { fetchDocument, normalizeUrl, searchLogged } from './sources.js';
 import { runJob } from './workflow.js';
 import { discoverCompetitions, runAutomatic } from './autonomous.js';
 import { processQueue } from './queue.js';
+import { startUI } from './ui.js';
 
 const program=new Command();
 program.name('compete').description('高校竞赛发现、研究和作品制作 CLI').version('0.1.0').option('-c, --config <path>','配置文件路径');
+program.action(()=>process.stdin.isTTY&&process.stdout.isTTY?startUI(program.opts().config):program.outputHelp());
+program.command('ui').description('打开交互式终端界面').action(()=>startUI(program.opts().config));
 function context(){const cfg=loadConfig(program.opts().config); const store=new Store(cfg.dataDir); return {cfg,store,gateway:new OfficialGateway(cfg,store)};}
 function print(x:unknown){console.log(JSON.stringify(x,null,2));}
 program.command('doctor').description('检查模型和搜索配置').action(()=>{const {cfg,store}=context();try{const report={dataDir:cfg.dataDir,writer:cfg.writer,reviewer:cfg.reviewer,coder:cfg.coder,credentials:{gemini:!!(process.env.GEMINI_API_KEY||process.env.GOOGLE_API_KEY||process.env.GOOGLE_GENERATIVE_AI_API_KEY),reviewer:cfg.reviewer.providerID==='deepseek'?!!process.env.DEEPSEEK_API_KEY:!!process.env.ANTHROPIC_API_KEY,codex:!!process.env.OPENAI_API_KEY,search:cfg.search.provider==='brave'?!!process.env.BRAVE_SEARCH_API_KEY:!!cfg.search.url},search:cfg.search,researchAgent:cfg.researchAgent,note:'仅检查配置存在，不验证密钥、模型权限、网络或配额；不会输出密钥'};print(report);if(!report.credentials.gemini||!report.credentials.reviewer||!report.credentials.search)process.exitCode=1;}finally{store.close();}});

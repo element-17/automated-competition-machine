@@ -42,6 +42,8 @@ Claude 研究 Agent 默认启用，可在 `researchAgent` 设置 `enabled`、`ma
 
 ## 使用
 
+在交互终端中直接运行 `npm start` 或 `node dist/cli.js ui`，可用方向键查看队列、搜索赛事、导入公告和逐个处理。终端界面使用开源的 `@clack/prompts` 和 `cli-table3`；原有命令仍适用于脚本和服务器。
+
 ```powershell
 # 发现赛事并入队
 node dist/cli.js scan --query '大学生 设计大赛 作品征集'
