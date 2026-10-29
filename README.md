@@ -38,6 +38,8 @@ node dist/cli.js doctor
 
 SearXNG 服务须启用 JSON 输出。可在 `sources` 中配置赛事列表页；系统同时搜索并读取这些页面。使用 `scan --url` 导入公告不需要搜索密钥。旧配置中的 OpenCode 地址、密码和 `searchProvider` 不再生效，请参考新示例配置迁移。
 
+也可设置 `"search":{"provider":"sources"}`，只监测 `sources` 中配置的高校通知列表，不需要搜索密钥。此模式不是全网搜索，不支持 `--query`，不能追查不在这些页面及公告链接中的往届作品；研究结果会记录检索范围受限。各校公告可能仅限本校参赛，也可能已经过期，入队前后仍须核验。
+
 Claude 研究 Agent 默认启用，可在 `researchAgent` 设置 `enabled`、`maxTurns` 和 `maxBudgetUsd`。禁用后仍保留原来的搜索、Claude 规则提取和证据核验，但不进行 Claude Agent 多步追查。Agent 搜索能力受账号权限、地区与网络影响。若需通过代理访问 Gemini API，可设置 `COMPETE_GEMINI_BASE_URL`；Claude API SDK 支持 `ANTHROPIC_BASE_URL`。这些地址接收对应凭据，只能指向可信服务。
 
 ## 使用

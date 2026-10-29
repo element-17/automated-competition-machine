@@ -10,7 +10,7 @@ const Config = z.object({
   image: z.object({ providerID: z.literal('google'), id: z.string().min(1) }).default({providerID:'google',id:'gemini-2.5-flash-image'}),
   coder: z.object({id:z.string().min(1)}).default({id:'gpt-5.4'}),
   researchAgent: z.object({enabled:z.boolean().default(true),maxTurns:z.number().int().min(1).max(10).default(4),maxBudgetUsd:z.number().positive().default(1)}).default({enabled:true,maxTurns:4,maxBudgetUsd:1}),
-  search: z.object({provider:z.enum(['brave','searxng']).default('brave'),url:z.string().url().optional()}).default({provider:'brave'}),
+  search: z.object({provider:z.enum(['brave','searxng','sources']).default('brave'),url:z.string().url().optional()}).default({provider:'brave'}),
   maxCalls: z.number().int().min(1).default(12),
   sources: z.array(z.string().url()).default([]),
   profile: z.object({ school: z.string().optional(), identity: z.string().optional() }).default({})

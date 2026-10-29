@@ -7,5 +7,5 @@ export const Brief = z.object({ title: z.string(), edition: z.string().nullable(
 export type Brief = z.infer<typeof Brief>;
 export type Evidence = { id: string; competitionId: string; url: string; title: string; text: string; fetchedAt: string; kind: string };
 export type ModelRole = 'writer' | 'reviewer';
-export interface ModelGateway { generate(role: ModelRole, prompt: string): Promise<string>; search(query: string): Promise<{url: string; title: string; snippet: string}[]>; investigate?(prompt:string):Promise<{text:string;sessionId:string;events:unknown[]}>; buildProject?(workspace:string,prompt:string):Promise<void>; generateImage?(prompt:string):Promise<{data:Buffer,mime:string}>; }
+export interface ModelGateway { readonly canSearch?:boolean; generate(role: ModelRole, prompt: string): Promise<string>; search(query: string): Promise<{url: string; title: string; snippet: string}[]>; investigate?(prompt:string):Promise<{text:string;sessionId:string;events:unknown[]}>; buildProject?(workspace:string,prompt:string):Promise<void>; generateImage?(prompt:string):Promise<{data:Buffer,mime:string}>; }
 export type Job = { id: string; competitionId: string; kind: string; state: string; createdAt: string; updatedAt: string; input: Record<string, unknown>; result: Record<string, unknown> | null; error: string | null; calls: number; maxCalls: number };

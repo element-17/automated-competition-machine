@@ -50,6 +50,7 @@ export function researchGraph(cfg:AppConfig,store:Store,gateway:ModelGateway) {
       if(valid.length!==brief.citations.length) brief.missing.push('部分引用无法在实际来源正文中核对，已剔除'); brief.citations=valid;
       for(const key of ['past_winners','past_works','judging'] as const){const before=brief.research[key].length;brief.research[key]=brief.research[key].filter(proof=>known.some(e=>e.url===proof.url&&proof.quote.trim().length>=5&&normalized(e.text).includes(normalized(proof.quote))));if(before!==brief.research[key].length)brief.research.missing.push(`${key} 部分证据无法逐字核对，已剔除`);}
       if(!brief.research.past_winners.length)brief.research.missing.push('尚未找到可核对的往届获奖名单');if(!brief.research.past_works.length)brief.research.missing.push('尚未找到可核对的往届完整作品或展示；不能判断创新性');if(!brief.research.judging.length)brief.research.missing.push('尚未找到可核对的评分细则');
+      if(gateway.canSearch===false)brief.research.missing.push('未配置全网关键词搜索，往届作品与相似方案检索范围受限');
       for(const field of ['eligibility','deadline','ai_rules','scoring']) if(brief[field as keyof typeof brief] && !valid.some(x=>x.field===field)) brief.missing.push(`${field} 缺少可核对的原文引用`);
       store.setBrief(s.competitionId,brief);await save(cfg,store,s.jobId,'research-coverage.json',JSON.stringify({coverage:brief.research,searches:store.searches(s.competitionId),source_attempts:store.sourceAttempts(s.competitionId)},null,2),'research_coverage',null); return {};
     })
