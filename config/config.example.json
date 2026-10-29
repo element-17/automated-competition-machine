@@ -1,11 +1,12 @@
 {
   "dataDir": "./data",
-  "opencodeUrl": "http://127.0.0.1:4096",
   "writer": { "providerID": "google", "id": "gemini-2.5-pro" },
   "reviewer": { "providerID": "anthropic", "id": "claude-sonnet-4-5" },
+  "coder": { "id": "gpt-5.4" },
+  "researchAgent": { "enabled": true, "maxTurns": 4, "maxBudgetUsd": 1 },
+  "search": { "provider": "brave" },
   "image": { "providerID": "google", "id": "gemini-2.5-flash-image" },
   "maxCalls": 12,
-  "searchProvider": "tinyfish",
   "sources": ["https://jsjds.blcu.edu.cn/"],
   "profile": { "school": "", "identity": "" }
 }

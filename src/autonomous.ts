@@ -6,7 +6,7 @@ import { z } from 'zod';
 import type { AppConfig } from './config.js';
 import type { Store } from './store.js';
 import type { ModelGateway, Brief } from './types.js';
-import { parseJSON } from './opencode.js';
+import { parseJSON } from './gateway.js';
 import { researchGraph } from './workflow.js';
 import { Work, renderWork, validateWork } from './artifacts.js';
 import { InterfaceCopy, makeSoftware } from './software.js';
@@ -78,7 +78,7 @@ export function autonomousGraph(cfg:AppConfig,store:Store,gateway:ModelGateway) 
       }
       if(route.kind==='software'){
         const copy=await cached(cfg,store,s.jobId,`software-${index+1}-copy.json`,InterfaceCopy,'gemini',async()=>parseJSON(await gateway.generate('writer',`${Guard}\n根据比赛与选题，为软件原型撰写完整、简短、具体的界面文字，所有文字必须由你产出。只输出 JSON {"title":"标题","strings":{"标识符":"界面文字"}}；不要虚构用户数据或实验结果。比赛 ${JSON.stringify(brief)}；选题 ${JSON.stringify(selected)}；资料 ${JSON.stringify(evidence)}`)));
-        try{const output=await makeSoftware(gateway,copy,brief,selected,route.format as 'zip'|'html',join(cfg.dataDir,'jobs',s.jobId,`deliverable-${index+1}`));store.artifact(s.jobId,'submission',output,cfg.reviewer.id);outputs.push(output);gaps.push(`软件原型 ${item.type} 已检查文件和 JavaScript 语法，尚未在运行环境中验证交互`);}catch(e){const message=e instanceof Error?e.message:String(e);if(/预算|上限|Agent|模型|OpenCode|调用|连接|超时/i.test(message))throw e;gaps.push(`软件作品 ${item.type} 制作失败：${message}`);}continue;
+        try{const output=await makeSoftware(gateway,copy,brief,selected,route.format as 'zip'|'html',join(cfg.dataDir,'jobs',s.jobId,`deliverable-${index+1}`));store.artifact(s.jobId,'submission',output,cfg.coder?.id||'codex');outputs.push(output);gaps.push(`软件原型 ${item.type} 已检查文件和 JavaScript 语法，尚未运行交互测试，也未验证所有动态界面文字均来自 Gemini`);}catch(e){const message=e instanceof Error?e.message:String(e);if(/预算|上限|Agent|模型|调用|连接|超时/i.test(message))throw e;gaps.push(`软件作品 ${item.type} 制作失败：${message}`);}continue;
       }
       const prompt=`${Guard}\n请针对这项比赛的指定交付物直接创作。所有参赛文字由你撰写，不使用固定模板。只能依据给定来源和真实原文；无法验证的数据、采访、实验不得虚构。${route.kind==='slides'?'输出 JSON {"kind":"slides","title":"","sources":[],"slides":[{"background":"FFFFFF","elements":[{"type":"text|rect|ellipse|line","text":"文字元素内容，其他元素可为空","x":0,"y":0,"w":5,"h":1,"fontSize":24,"color":"202832","fill":"可选六位色值","bold":false}]}]}；每个 type 只选一个值。页面宽13.333英寸高7.5英寸，元素自行布局，文本框不要重叠或溢出。':'输出 JSON {"kind":"text","title":"","text":"完整作品正文","sources":[]}。'}\n规则 ${JSON.stringify(brief)}\n本项交付物 ${JSON.stringify(item)}\n选题 ${JSON.stringify(selected)}\n证据 ${JSON.stringify(evidence)}\n比赛提供的原文 ${JSON.stringify(sourceText)}`;
       const initial=await cached(cfg,store,s.jobId,`work-${index+1}-draft.json`,Work,'gemini',async()=>parseJSON(await gateway.generate('writer',prompt)));if(initial.kind!==route.kind)throw Error(`Gemini 返回类型 ${initial.kind} 与要求 ${route.kind} 不符`);

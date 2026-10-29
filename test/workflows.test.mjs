@@ -8,7 +8,6 @@ import { Store } from '../dist/store.js';
 import { runJob } from '../dist/workflow.js';
 import { Brief } from '../dist/types.js';
 import { loadConfig } from '../dist/config.js';
-import { OpenCodeGateway } from '../dist/opencode.js';
 import { readSource } from '../dist/sources.js';
 
 const baseBrief={title:'测试翻译竞赛',edition:'2026',eligibility:null,deadline:null,ai_rules:null,scoring:null,deliverables:[{type:'translation',quantity:null,formats:['txt'],limits:[],naming:null,attachments:[],submission:null,official_template:null}],requires_idea:false,missing:[]};
@@ -41,11 +40,6 @@ test('研究流程保存实际来源、查询与结构化规则',async()=>{
  }finally{server.close();store.close();await rm(dir,{recursive:true,force:true});}
 });
 test('预算计数持久化并拒绝超额；非 Gemini 写作配置被拒绝',async()=>{const {dir,store}=await setup();try{const id=store.addCompetition('https://example.org/budget','赛');const job=store.createJob(id,'research',{},1);store.consumeCall(job);assert.throws(()=>store.consumeCall(job),/上限/);assert.equal(store.job(job).calls,1);const cfg=join(dir,'bad.json');await writeFile(cfg,JSON.stringify({dataDir:dir,writer:{providerID:'anthropic',id:'x'},reviewer:{providerID:'other',id:'y'}}));assert.throws(()=>loadConfig(cfg));}finally{store.close();await rm(dir,{recursive:true,force:true});}});
-test('OpenCode HTTP 客户端使用指定模型并严格限制预算',async()=>{
- const {dir,store,cfg}=await setup();const requests=[];const server=createServer(async(req,res)=>{let body='';for await(const chunk of req)body+=chunk;requests.push({url:req.url,body:JSON.parse(body||'{}')});res.setHeader('content-type','application/json');if(req.url==='/api/experimental/generate/text')res.end(JSON.stringify({data:{text:'生成内容'}}));else if(req.url==='/api/websearch')res.end(JSON.stringify({location:{},data:{providerID:'mock',results:[{url:'https://example.org',title:'比赛',content:'摘要',time:{}}]}}));else{res.statusCode=404;res.end('{}');}});await new Promise(r=>server.listen(0,'127.0.0.1',r));cfg.opencodeUrl=`http://127.0.0.1:${server.address().port}`;
- try{const id=store.addCompetition('https://example.org/c','赛');const job=store.createJob(id,'research',{},2);const g=new OpenCodeGateway(cfg,store,job);assert.equal(await g.generate('writer','撰写'),'生成内容');assert.equal(await g.generate('reviewer','评审'),'生成内容');assert.deepEqual(requests.slice(0,2).map(x=>x.body.model.providerID),['google','anthropic']);assert.equal((await g.search('赛事'))[0].title,'比赛');await assert.rejects(g.generate('writer','第三次'),/上限/);assert.equal(store.job(job).calls,2);
- }finally{server.close();store.close();await rm(dir,{recursive:true,force:true});}
-});
 test('文档类比赛使用 Gemini 撰稿与修订，不强加固定版式',async()=>{
  const {dir,store,cfg}=await setup();try{const id=store.addCompetition('https://example.org/report','方案比赛');store.setBrief(id,Brief.parse({...baseBrief,deliverables:[{...baseBrief.deliverables[0],type:'报告',formats:['md']}],requires_idea:true}));const source=join(dir,'source.txt');await writeFile(source,'社区已有调研材料');const job=store.createJob(id,'report',{sourcePath:source,instructions:'提出服务方案',format:'md'},10);const calls=[];const g={search:async()=>[],generate:async(role,prompt)=>{calls.push({role,prompt});return calls.length===1?'方案初稿':calls.length===2?'[]':'方案终稿';}};const r=await runJob(cfg,store,g,job);assert.equal(await readFile(r.outputPath,'utf8'),'方案终稿');assert.deepEqual(calls.map(x=>x.role),['writer','reviewer','writer']);assert.match(calls[0].prompt,/不使用预设模板/);
  }finally{store.close();await rm(dir,{recursive:true,force:true});}

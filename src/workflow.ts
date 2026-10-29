@@ -7,7 +7,7 @@ import { Document, Packer, Paragraph } from 'docx';
 import { Brief, type ModelGateway } from './types.js';
 import type { Store } from './store.js';
 import type { AppConfig } from './config.js';
-import { parseJSON } from './opencode.js';
+import { parseJSON } from './gateway.js';
 import { fetchDocument, readSource, saveSource, searchLogged } from './sources.js';
 
 const State=Annotation.Root({ jobId:Annotation<string>, competitionId:Annotation<string>, sourcePath:Annotation<string>, targetLanguage:Annotation<string>, instructions:Annotation<string>, format:Annotation<string>, draft:Annotation<string>, review:Annotation<string>, finalText:Annotation<string>, report:Annotation<string>, outputPath:Annotation<string> });
@@ -34,6 +34,14 @@ export function researchGraph(cfg:AppConfig,store:Store,gateway:ModelGateway) {
         queries.forEach(q=>used.add(q));const results=await Promise.all(queries.map(q=>searchLogged(store,gateway,s.competitionId,q)));await Promise.all(results.flatMap(group=>group.slice(0,2).map(r=>saveSource(store,s.competitionId,r.url,'followup',r.title).catch(()=>null))));
       }return {};
     })
+    .addNode('agentResearch',async(s:S)=>{
+      if(!gateway.investigate||cfg.researchAgent?.enabled===false)return {};
+      const c=store.competition(s.competitionId);const evidence=store.evidence(s.competitionId).map(e=>({url:e.url,title:e.title,text:e.text.slice(0,5000)}));
+      const result=await gateway.investigate(`${textGuard}\n自主研究 ${c.title} 的往届获奖名单、作品名称和作者，再沿学校报道、团队页面追查公开的完整作品或演示。每一步用搜索与页面验证，不得编造。仅输出 JSON {"urls":[{"url":"https://...","title":"..."}],"missing":["..."]}，只填实际访问过的 URL，最多 10 个。已有证据：${JSON.stringify(evidence)}`);
+      await save(cfg,store,s.jobId,'claude-research.json',JSON.stringify({sessionId:result.sessionId,result:result.text},null,2),'research_agent',cfg.reviewer.id);
+      const parsed=parseJSON(result.text) as any;if(!Array.isArray(parsed?.urls))throw Error('Claude 研究 Agent 未返回可验证的来源列表');
+      await Promise.all(parsed.urls.slice(0,10).filter((x:any)=>typeof x?.url==='string').map((x:any)=>saveSource(store,s.competitionId,x.url,'agent_research',typeof x.title==='string'?x.title:undefined).catch(()=>null)));return {};
+    })
     .addNode('analyze',async(s:S)=>{
       const c=store.competition(s.competitionId); const sources=store.evidence(s.competitionId).map(e=>({url:e.url,title:e.title,kind:e.kind,text:e.text.slice(0,18000)}));
       const prompt=`${textGuard}\n读取来源并只输出一个 JSON 对象，字段必须为 title, edition, eligibility, deadline, ai_rules, scoring, deliverables, requires_idea, missing, citations, research。未知值用 null，不要猜测；冲突与未知记在 missing。deliverables 是数组，每项包含 type, quantity, formats(数组), limits(数组), naming, attachments(数组), submission, official_template；没有明确规定的项用 null 或空数组；不要制定模板。citations 为数组，每项包含 field、url、quote，其中 quote 必须逐字摘自该 url 的来源正文；每项已知规则尽量提供引用。research 必须为 {past_winners:[],past_works:[],judging:[],missing:[]}，前三项为 {url,quote,title} 数组；仅当找到真实获奖名单时填 past_winners，仅找到实际公开作品、代码或展示时填 past_works，仅有奖项或标题不足以证明完整作品；评分依据填 judging。quote 必须逐字来自该 URL 正文；未找到就留空，不要猜测。requires_idea 对翻译等给定材料的任务为 false，不确定为 null。赛事：${c.title}\n用户情况：${JSON.stringify(cfg.profile)}\n来源：${JSON.stringify(sources)}`;
@@ -50,7 +58,7 @@ export function researchGraph(cfg:AppConfig,store:Store,gateway:ModelGateway) {
       const report=await gateway.generate('writer',`${textGuard}\n依据以下数据撰写中文赛事研究报告。对每项可核实事实标注来源 URL。明确区分当届规则、历届获奖名单与公开完整作品；如果证据不足或无公开作品，明确说明，不得推断其不存在或捏造。指出资格、截止日期、评分、AI规则、交付要求、冲突及资料缺口。\n档案：${JSON.stringify(c.brief)}\n证据：${JSON.stringify(evidence)}\n检索记录：${JSON.stringify(searches)}\n来源访问记录：${JSON.stringify(store.sourceAttempts(s.competitionId))}`);
       const path=await save(cfg,store,s.jobId,'research.md',report,'research_report','gemini'); return {report,outputPath:path};
     })
-    .addEdge(START,'collect').addEdge('collect','followup').addEdge('followup','analyze').addEdge('analyze','writeReport').addEdge('writeReport',END);
+    .addEdge(START,'collect').addEdge('collect','followup').addEdge('followup','agentResearch').addEdge('agentResearch','analyze').addEdge('analyze','writeReport').addEdge('writeReport',END);
   const saver=SqliteSaver.fromConnString(join(cfg.dataDir,'checkpoints.sqlite')); return {graph:builder.compile({checkpointer:saver}),saver};
 }
 
