@@ -8,6 +8,7 @@ import { runJob } from './workflow.js';
 import { discoverCompetitions, runAutomatic, isCompetitionCandidate } from './autonomous.js';
 import { processQueue } from './queue.js';
 import { startUI } from './ui.js';
+import { screenQueue } from './screening.js';
 
 const program=new Command();
 program.name('compete').description('高校竞赛发现、研究和作品制作 CLI').version('0.1.0').option('-c, --config <path>','配置文件路径');
@@ -37,12 +38,21 @@ program.command('produce').description('制作翻译或报告作品').argument('
 });
 program.command('status').description('查看任务及已保存产物').argument('<job-id>').action(id=>{const {store}=context();try{print({job:store.job(id),artifacts:store.artifacts(id)});}finally{store.close();}});
 program.command('queue').description('查看持久化赛事处理队列').action(()=>{const {store}=context();try{print(store.queue());}finally{store.close();}});
+program.command('queue-history').description('查看赛事的审核历史').argument('<competition-id>').action(id=>{const {store}=context();try{store.competition(id);print(store.queueReviewHistory(id));}finally{store.close();}});
+program.command('queue-add').description('手动添加公告到队列').argument('<url>').option('--title <title>','手动指定名称；不指定时读取公告').action(async(url,opts)=>{const {store}=context();try{const link=normalizeUrl(url);const title=opts.title?.trim()||(await fetchDocument(link)).title;if(!title)throw Error('赛事名称不能为空');const id=store.addCompetition(link,title);print({competitionId:id,enqueued:store.enqueue(id)});}finally{store.close();}});
+program.command('queue-edit').description('修改队列中的赛事名称或公告地址').argument('<competition-id>').option('--title <title>','新名称').option('--url <url>','新公告地址').action((id,opts)=>{const {store}=context();try{if(opts.title===undefined&&opts.url===undefined)throw Error('请指定 --title 或 --url');const c=store.competition(id);store.updateQueue(id,opts.title??c.title,opts.url??c.url);print({competitionId:id,reviewStatus:'unreviewed'});}finally{store.close();}});
+program.command('queue-delete').description('从队列移除赛事，保留赛事档案和任务产物').argument('<competition-id>').action(id=>{const {store}=context();try{store.deleteQueue(id);print({competitionId:id,removed:true});}finally{store.close();}});
+program.command('queue-review').description('用评审模型审核队列，保留原文依据').argument('[competition-id]').option('--limit <number>','最多审核条数',Number,10).option('--force','重新审核已有结果').action(async(id,opts)=>{const {cfg,store,gateway}=context();try{const results=await screenQueue(cfg,store,gateway,{id,limit:opts.limit,force:!!opts.force,onStart:item=>console.error(`审核：${item.title}`)});print({results});}finally{store.close();}});
+program.command('queue-decision').description('人工设置审核结果').argument('<competition-id>').argument('<decision>','valid、invalid 或 needs_review').requiredOption('--reason <reason>','人工判断理由').action((id,decision,opts)=>{const {store}=context();try{if(!['valid','invalid','needs_review'].includes(decision))throw Error('审核结果必须为 valid、invalid 或 needs_review');if(!opts.reason.trim())throw Error('请填写判断理由');store.setQueueReview(id,{decision,reason:opts.reason.trim(),reviewer:'manual'});print({competitionId:id,decision});}finally{store.close();}});
 program.command('enqueue').description('将已有赛事加入队列').argument('[competition-id]').option('--all','加入所有已发现赛事').option('--redo','重新加入已完成或失败的赛事').action((id,opts)=>{const {store}=context();try{if(!id&&!opts.all)throw Error('请指定赛事 ID 或 --all');if(id&&opts.all)throw Error('赛事 ID 和 --all 不能同时使用');const ids=id?[id]:store.list().map(x=>x.id as string);let enqueued=0;for(const item of ids)if(store.enqueue(item,!!opts.redo))enqueued++;print({enqueued});}finally{store.close();}});
 program.command('retry').description('将失败的队列项重新加入等待队列').argument('[competition-id]','不指定时重试所有失败项').action(id=>{const {store}=context();try{print({requeued:store.retryQueue(id)});}finally{store.close();}});
 async function workQueue(cfg:ReturnType<typeof loadConfig>,store:Store,opts:{limit:number;budget:number}) {
  if(!Number.isInteger(opts.limit)||opts.limit<1||!Number.isInteger(opts.budget)||opts.budget<1)throw Error('limit 和 budget 必须为正整数');
  if(!store.queue().some((x:any)=>x.state==='queued'||x.state==='processing'))return [];
- const missing=[];if(!(process.env.GEMINI_API_KEY||process.env.GOOGLE_API_KEY||process.env.GOOGLE_GENERATIVE_AI_API_KEY))missing.push('GEMINI_API_KEY');if(!(cfg.reviewer.providerID==='deepseek'?process.env.DEEPSEEK_API_KEY:process.env.ANTHROPIC_API_KEY))missing.push(cfg.reviewer.providerID==='deepseek'?'DEEPSEEK_API_KEY':'ANTHROPIC_API_KEY');if(missing.length)throw Error(`赛事队列已保存，但模型不可用：请配置 ${missing.join('、')}`);
+ const reviewerKey=cfg.reviewer.providerID==='deepseek'?process.env.DEEPSEEK_API_KEY:process.env.ANTHROPIC_API_KEY;if(!reviewerKey)throw Error(`赛事队列已保存，但模型不可用：请配置 ${cfg.reviewer.providerID==='deepseek'?'DEEPSEEK_API_KEY':'ANTHROPIC_API_KEY'}`);
+ const reviewed=await screenQueue(cfg,store,new OfficialGateway(cfg,store),{limit:opts.limit,onStart:item=>console.log(`审核：${item.title}`)});if(reviewed.length)console.log(`本次审核 ${reviewed.length} 场，只有审核通过的赛事会进入制作；其他结果可在队列查看。`);
+ if(!store.queue().some((x:any)=>x.state==='queued'&&x.reviewStatus==='valid')){console.log('没有审核通过的待处理赛事；可继续审核或人工确认。');return [];}
+ if(!(process.env.GEMINI_API_KEY||process.env.GOOGLE_API_KEY||process.env.GOOGLE_GENERATIVE_AI_API_KEY))throw Error('赛事队列已保存，但模型不可用：请配置 GEMINI_API_KEY');
  return processQueue(store,{limit:opts.limit,budget:opts.budget,onStart:task=>console.log(`${task.resume?'恢复':'开始'} ${store.competition(task.competitionId).title}；任务 ${task.jobId}`),onError:(task,error)=>console.error(`任务 ${task.jobId} 未完成：${error}`),run:task=>runAutomatic(cfg,store,new OfficialGateway(cfg,store,task.jobId),task.jobId,task.resume)});
 }
 program.command('work').description('按顺序处理已持久化的赛事队列').option('--limit <number>','本次最多处理的赛事数',Number,3).option('--budget <calls>','每场赛事最多模型调用次数',Number,30).action(async(opts)=>{const {cfg,store}=context();try{const processed=await workQueue(cfg,store,opts);print({processed});if(processed.some(x=>x.error))process.exitCode=1;}finally{store.close();}});

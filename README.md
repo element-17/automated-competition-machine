@@ -44,13 +44,19 @@ Claude 研究 Agent 默认启用，可在 `researchAgent` 设置 `enabled`、`ma
 
 ## 使用
 
-在交互终端中直接运行 `npm start` 或 `node dist/cli.js ui`，可用方向键查看队列、搜索赛事、导入公告和逐个处理。终端界面使用开源的 `@clack/prompts` 和 `cli-table3`；原有命令仍适用于脚本和服务器。
+在交互终端中直接运行 `npm start` 或 `node dist/cli.js ui`，可用方向键搜索或导入赛事、查看和修改队列、移除赛事、审核与逐个处理。终端界面使用开源的 `@clack/prompts` 和 `cli-table3`；原有命令仍适用于脚本和服务器。
 
 ```powershell
 # 发现赛事并入队
 node dist/cli.js scan --query '大学生 设计大赛 作品征集'
 node dist/cli.js scan --url 'https://主办方公告地址'
 node dist/cli.js queue
+node dist/cli.js queue-review --limit 10
+node dist/cli.js queue-history <赛事ID>
+node dist/cli.js queue-add 'https://主办方公告地址'
+node dist/cli.js queue-edit <赛事ID> --title '修改后的名称'
+node dist/cli.js queue-delete <赛事ID>
+node dist/cli.js queue-decision <赛事ID> valid --reason '已人工确认当届要求'
 
 # 根据队列逐场处理
 node dist/cli.js work --limit 3 --budget 40
@@ -66,6 +72,8 @@ node dist/cli.js auto --url 'https://主办方公告地址' --budget 40
 `research <赛事ID>` 可单独研究，`show <赛事ID>` 查看档案与来源。手动 `produce` 支持翻译和报告，使用 `node dist/cli.js produce --help` 查看参数；不属于队列的失败任务可用 `resume <任务ID> --budget 40` 恢复。
 
 队列存储在 `data/competition.sqlite`，每场任务的检查点和产物在数据目录中。`queued` 表示等待、`processing` 表示处理中、`completed` 表示流程结束、`failed` 表示失败；完成不代表作品符合全部要求。失败后 `retry` 再运行 `work`，继续原任务。进程被强制终止后，队列租约最长约 5 分钟过期，再运行 `work` 可恢复。不要同时让多个容器使用不支持 SQLite 锁语义的网络共享目录。
+
+审核状态独立于处理状态：`unreviewed` 未审核、`valid` 通过、`invalid` 无效、`needs_review` 待人工确认。审核器读取公告和相关链接，由评审模型判断是否仍能报名或提交，并核对原文引用；缺少证据、截止时间不明或来源无法读取时标为待确认。自动审核每场最多调用一次评审模型，`--limit` 限制数量；`work` 在制作前会先审核不超过 `--limit` 场，只有审核通过的项目会被领取。结果可能出错，资格和截止时间仍需人工核对；可在界面人工修改审核结果。已确认的截止日期过期后不会继续进入制作。审核记录保存在数据库，删除队列项不会删除赛事档案、审核历史或已有任务产物。公告地址已有来源或任务后不能修改，以免混淆证据；请另加新赛事。
 
 LangGraph 检查点和 Agent 会话 ID 分别保存。Claude 研究会话、事件保存在任务目录 `claude-research/`；Codex 工作区和线程位于该交付物的 `workspace/`，因此恢复依赖保留整个数据目录。Agent 输出和网页均为外部信息，来源可访问并不证明其内容真实。
 
