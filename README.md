@@ -5,7 +5,7 @@
 ## 架构和分工
 
 - Gemini 官方 SDK 负责参赛方案、译文、报告、PPT 文案及修订；Gemini 不可用时不会自动换模型。
-- Claude 官方 API 负责规则提取、独立评审和选题比较。Claude Agent SDK 使用 WebSearch / WebFetch 多步追查往届名单、作品及学校报道；Agent 返回的地址由程序重新获取后才能作为来源。
+- Claude 或 DeepSeek 官方 API 负责规则提取、独立评审和选题比较。使用 Claude 时，Claude Agent SDK 可使用 WebSearch / WebFetch 多步追查往届名单、作品及学校报道；Agent 返回的地址由程序重新获取后才能作为来源。选择 DeepSeek 时，需关闭 Claude 研究 Agent，常规搜索和往届追查仍会执行。
 - Codex 官方 SDK 负责静态网页原型的代码。Gemini 先提供用户文案；编码完成后校验 `copy.js` 和 HTML 静态文案，代码仍需进一步人工检查。
 - Brave Search API 或用户配置的 SearXNG 提供赛事发现与研究搜索；LangGraph 和 SQLite 保存流程、证据与队列。系统不再启动或依赖 OpenCode。
 
@@ -26,7 +26,11 @@ $env:BRAVE_SEARCH_API_KEY = '<Brave Search API key>'
 node dist/cli.js doctor
 ```
 
-`OPENAI_API_KEY` 仅在生成软件原型时必需。`doctor` 检查环境变量和配置是否存在，不验证密钥、账户权限、模型、网络或额度。搜索默认需要 Brave Search API；也可把配置里的 `search` 改成：
+`OPENAI_API_KEY` 仅在生成软件原型时必需。`doctor` 检查环境变量和配置是否存在，不验证密钥、账户权限、模型、网络或额度。
+
+也可使用 DeepSeek 评审：设置 `DEEPSEEK_API_KEY`，并在配置中将 `reviewer` 设为 `{"providerID":"deepseek","id":"deepseek-flash"}`、将 `researchAgent.enabled` 设为 `false`。Gemini 仍是唯一的作品文字撰写模型。CLI 启动时会读取项目目录的 `.env`，该文件已被 Git 忽略；环境中已有变量优先。
+
+搜索默认需要 Brave Search API；也可把配置里的 `search` 改成：
 
 ```json
 {"provider":"searxng","url":"http://127.0.0.1:8080"}
