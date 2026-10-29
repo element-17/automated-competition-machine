@@ -94,13 +94,6 @@ export function autonomousGraph(cfg:AppConfig,store:Store,gateway:ModelGateway) 
  const saver=SqliteSaver.fromConnString(join(cfg.dataDir,'checkpoints.sqlite'));return {graph:b.compile({checkpointer:saver}),saver};
 }
 
-export const isCompetitionCandidate=(title:string)=>!/获奖名单|获奖公告|评审结果|圆满落幕|获奖公示|比赛结果|入围名单|评审公示|竞赛平台|竞赛导航|比赛大全|赛事大全|竞赛汇总|竞赛资讯|竞赛榜单|竞赛信息网|竞赛网|赛事平台|大赛平台|竞赛中心首页|竞赛归档|赛事归档|报名系统|报名平台|竞赛列表|赛事列表|竞赛分类|赛事专区|竞赛专区/.test(title)&&/竞赛|比赛|大赛|挑战赛|征文|征稿|作品征集/.test(title);
-
-export async function discoverCompetitions(store:Store,gateway:ModelGateway,query?:string,sources:readonly string[]=[]) {
- const year=new Date().getFullYear();const queries=query?[query]:[`${year} 大学生 竞赛 征集作品 报名`,`${year} 高校 翻译大赛 征稿`,`${year} 大学生 设计大赛 海报 摄影`,`${year} 大学生 创新 创业 比赛 项目 方案`,`${year} 大学生 AI 创意 软件 比赛`,`${year} 大学生 征文 写作 比赛`,`${year} 大学生 视频 微课 比赛 作品`];
-
- const score=(r:{title:string;url:string})=>{let n=0;try{if(/\.(edu|gov)\.cn$/i.test(new URL(r.url).hostname))n+=3;}catch{}if(r.title.includes(String(year))||r.title.includes(String(year+1)))n+=2;if(/通知|征集|征稿|章程|报名/.test(r.title))n++;return n;};
- const lists=await Promise.all(queries.map(async q=>(await searchLogged(store,gateway,null,q)).filter(r=>isCompetitionCandidate(r.title)).sort((a,b)=>score(b)-score(a))));for(const source of sources){try{const page=await fetchDocument(source);const links=page.links.filter(x=>isCompetitionCandidate(x.title)).slice(0,30).map(x=>({url:x.url,title:x.title,snippet:''}));store.search(null,`source:${source}`,links);lists.push(links.sort((a,b)=>score(b)-score(a)));}catch(e){store.search(null,`source:${source}`,[],e instanceof Error?e.message:String(e));}}const ranked:{id:string;score:number}[]=[];const max=Math.max(0,...lists.map(x=>x.length));for(let i=0;i<max;i++)for(const list of lists){const r=list[i];if(!r)continue;try{const u=new URL(r.url);if(!['http:','https:'].includes(u.protocol))continue;u.hash='';const id=store.addCompetition(u.toString(),r.title);if(!ranked.some(x=>x.id===id))ranked.push({id,score:score(r)});}catch{}}return ranked.sort((a,b)=>b.score-a.score).map(x=>x.id);
-}
+export { isCompetitionCandidate, discoverCompetitions } from './discovery.js';
 
 export async function runAutomatic(cfg:AppConfig,store:Store,gateway:ModelGateway,jobId:string,resume=false){const job=store.job(jobId);if(job.kind!=='automatic')throw Error('不是自动竞赛任务');if(job.state==='completed')throw Error('任务已经完成');const runtime=autonomousGraph(cfg,store,gateway);const conf={configurable:{thread_id:jobId}};store.setJob(jobId,'running');try{const result=await runtime.graph.invoke(resume?null as any:{jobId,competitionId:job.competitionId} as any,conf);store.setJob(jobId,'completed',null,{gate:result.gate,outputs:result.outputs,gaps:result.gaps});return result;}catch(e){store.setJob(jobId,'failed',e instanceof Error?e.message:String(e));throw e;}finally{runtime.saver.db.close();}}

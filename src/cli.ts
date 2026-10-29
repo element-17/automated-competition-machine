@@ -1,11 +1,14 @@
 #!/usr/bin/env node
 import { Command } from 'commander';
-import { loadConfig } from './config.js';
+import { readFileSync } from 'node:fs';
+import { loadConfig, savePrompt } from './config.js';
+import { agents, agentLabels, isCustomPrompt, promptOf, type AgentName } from './prompts.js';
 import { Store } from './store.js';
 import { OfficialGateway } from './gateway.js';
-import { fetchDocument, normalizeUrl, searchLogged } from './sources.js';
+import { fetchDocument, normalizeUrl } from './sources.js';
 import { runJob } from './workflow.js';
-import { discoverCompetitions, runAutomatic, isCompetitionCandidate } from './autonomous.js';
+import { runAutomatic } from './autonomous.js';
+import { discoverCompetitions, plannedQueries, siteOf, SCREEN_RECORD } from './discovery.js';
 import { processQueue } from './queue.js';
 import { startUI } from './ui.js';
 import { screenQueue } from './screening.js';
@@ -16,18 +19,21 @@ program.action(()=>process.stdin.isTTY&&process.stdout.isTTY?startUI(program.opt
 program.command('ui').description('打开交互式终端界面').action(()=>startUI(program.opts().config));
 function context(){const cfg=loadConfig(program.opts().config); const store=new Store(cfg.dataDir); return {cfg,store,gateway:new OfficialGateway(cfg,store)};}
 function print(x:unknown){console.log(JSON.stringify(x,null,2));}
-program.command('doctor').description('检查模型和搜索配置').action(()=>{const {cfg,store}=context();try{const report={dataDir:cfg.dataDir,writer:cfg.writer,reviewer:cfg.reviewer,coder:cfg.coder,credentials:{gemini:!!(process.env.GEMINI_API_KEY||process.env.GOOGLE_API_KEY||process.env.GOOGLE_GENERATIVE_AI_API_KEY),reviewer:cfg.reviewer.providerID==='deepseek'?!!process.env.DEEPSEEK_API_KEY:!!process.env.ANTHROPIC_API_KEY,codex:!!process.env.OPENAI_API_KEY,search:cfg.search.provider==='sources'?cfg.sources.length>0:cfg.search.provider==='brave'?!!process.env.BRAVE_SEARCH_API_KEY:!!cfg.search.url},search:cfg.search,searchScope:cfg.search.provider==='sources'?'仅监测已配置来源，不支持全网关键词搜索':'关键词搜索',researchAgent:cfg.researchAgent,note:'仅检查配置存在，不验证密钥、模型权限、网络或配额；不会输出密钥'};print(report);if(!report.credentials.gemini||!report.credentials.reviewer||!report.credentials.search)process.exitCode=1;}finally{store.close();}});
+program.command('doctor').description('检查模型和搜索配置').action(()=>{const {cfg,store}=context();try{const report={dataDir:cfg.dataDir,writer:cfg.writer,reviewer:cfg.reviewer,coder:cfg.coder,credentials:{gemini:!!(process.env.GEMINI_API_KEY||process.env.GOOGLE_API_KEY||process.env.GOOGLE_GENERATIVE_AI_API_KEY),reviewer:cfg.reviewer.providerID==='deepseek'?!!process.env.DEEPSEEK_API_KEY:!!process.env.ANTHROPIC_API_KEY,codex:!!process.env.OPENAI_API_KEY,search:cfg.search.provider==='sources'?cfg.sources.length>0:cfg.search.provider==='brave'?!!process.env.BRAVE_SEARCH_API_KEY:!!cfg.search.url},search:cfg.search,sources:cfg.sources,nextQueries:cfg.search.provider==='sources'?[]:plannedQueries(store,cfg.search),searchScope:cfg.search.provider==='sources'?'仅监测已配置来源，不支持全网关键词搜索':'关键词搜索',researchAgent:cfg.researchAgent,note:'仅检查配置存在，不验证密钥、模型权限、网络或配额；不会输出密钥'};print(report);if(!report.credentials.gemini||!report.credentials.reviewer||!report.credentials.search)process.exitCode=1;}finally{store.close();}});
 program.command('scan').description('发现或导入公开赛事公告').option('-q, --query <query>','搜索关键词').option('-u, --url <url>','导入赛事公告 URL').action(async(opts)=>{
   const {cfg,store,gateway}=context(); try{
     if(opts.url){const d=await fetchDocument(opts.url);const id=store.addCompetition(normalizeUrl(opts.url),d.title);const enqueued=store.enqueue(id);print({id,title:d.title,url:normalizeUrl(opts.url),enqueued}); return;}
     if(opts.query&&cfg.search.provider==='sources')throw Error('当前仅监测来源列表，不支持关键词搜索；请配置 Brave 或 SearXNG');
     if(cfg.search.provider==='sources')console.error('当前仅扫描配置的高校来源列表，不支持全网关键词搜索。');
-    const year=new Date().getFullYear(); const queries=opts.query?[opts.query]:[`${year} 大学生 竞赛 征集作品 通知`,`${year} 高校 翻译大赛 征稿 通知`,`${year} 大学生 创新设计大赛 征集作品 通知`]; const found=[];
-    let enqueued=0;for(const q of queries){ const rs=await searchLogged(store,gateway,null,q); for(const r of rs){if(!isCompetitionCandidate(r.title))continue;try{const url=normalizeUrl(r.url);const id=store.addCompetition(url,r.title);if(store.enqueue(id))enqueued++;found.push({id,title:r.title,url,query:q});}catch{}} }
-    for(const url of cfg.sources){try{const page=await fetchDocument(url); for(const x of page.links.filter(x=>isCompetitionCandidate(x.title)).slice(0,20)){const id=store.addCompetition(x.url,x.title);if(store.enqueue(id))enqueued++;found.push({id,title:x.title,url:x.url,query:`来源:${url}`});}}catch(e){console.error(`来源读取失败 ${url}: ${e instanceof Error?e.message:String(e)}`);}}
-    print({found,enqueued}); if(!found.length){console.error('没有找到结果；检查搜索服务，或使用 scan --url 导入官方公告。');process.exitCode=1;}
+    const started=new Date().toISOString();const ids=await discoverCompetitions(store,gateway,opts.query,cfg.sources,cfg.search);let enqueued=0;const found=ids.map(id=>{const c=store.competition(id);if(store.enqueue(id))enqueued++;return {id,title:c.title,url:c.url};});
+    const screen=(store.searches(null) as {query:string;results:string;searched_at:string;error:string|null}[]).filter(x=>x.query===SCREEN_RECORD&&x.searched_at>=started).at(-1);
+    print({found,enqueued,sites:new Set(found.map(x=>siteOf(x.url))).size,screening:screen?{...JSON.parse(screen.results),error:screen.error}:null}); if(!found.length){console.error('没有找到结果；检查搜索服务，或使用 scan --url 导入官方公告。');process.exitCode=1;}
   }finally{store.close();}
 });
+const agentArg=(name:string)=>{if(!(agents as readonly string[]).includes(name))throw Error(`Agent 必须为 ${agents.join('、')}`);return name as AgentName;};
+program.command('prompts').description('查看各 Agent 的系统提示词').argument('[agent]',agents.join('、')).action(name=>{const cfg=loadConfig(program.opts().config);print((name?[agentArg(name)]:agents).map(a=>({agent:a,label:agentLabels[a],custom:isCustomPrompt(cfg,a),prompt:promptOf(cfg,a)})));});
+program.command('prompt-set').description('修改 Agent 的系统提示词').argument('<agent>',agents.join('、')).option('--text <text>','新的提示词').option('--file <path>','从文本文件读取提示词').action((name,opts)=>{const agent=agentArg(name);if(!!opts.text===!!opts.file)throw Error('请指定 --text 或 --file 其中之一');const text=opts.text??readFileSync(opts.file,'utf8');if(!text.trim())throw Error('提示词不能为空；恢复默认请用 prompt-reset');savePrompt(program.opts().config,agent,text);print({agent,custom:true});});
+program.command('prompt-reset').description('恢复 Agent 的默认系统提示词').argument('<agent>',agents.join('、')).action(name=>{const agent=agentArg(name);savePrompt(program.opts().config,agent,'');print({agent,custom:false});});
 program.command('list').description('列出已发现赛事').action(()=>{const {store}=context();try{print(store.list());}finally{store.close();}});
 program.command('show').description('查看赛事、规则、证据及检索日志').argument('<competition-id>').action((id)=>{const {store}=context();try{print({competition:store.competition(id),evidence:store.evidence(id).map(({text,...x})=>({...x,excerpt:text.slice(0,500)})),searches:store.searches(id)});}finally{store.close();}});
 program.command('research').description('研究赛事规则与往届公开作品').argument('<competition-id>').option('--budget <calls>','最多模型调用次数',Number).action(async(id,opts)=>{
@@ -61,7 +67,7 @@ program.command('resume').description('从持久检查点恢复失败任务').ar
 });
 program.command('auto').description('自动发现赛事、追查往届作品、比较方案并制作可支持的交付物').option('-q, --query <query>','限定搜索方向；不指定时覆盖多种赛事').option('-u, --url <url>','直接处理指定公告；不指定时自动发现').option('--limit <number>','本次最多处理的赛事数',Number,3).option('--budget <calls>','每场赛事最多模型调用次数',Number,30).option('--redo','重新处理已完成的赛事').action(async(opts)=>{
  const {cfg,store}=context();try{if(opts.query&&cfg.search.provider==='sources'&&!opts.url)throw Error('当前仅监测来源列表，不支持关键词搜索；请配置 Brave 或 SearXNG');if(cfg.search.provider==='sources'&&!opts.url)console.error('当前仅扫描配置的高校来源列表，不支持全网关键词搜索。');if(!Number.isInteger(opts.limit)||opts.limit<1||!Number.isInteger(opts.budget)||opts.budget<1)throw Error('limit 和 budget 必须为正整数');const discoveryGateway=new OfficialGateway(cfg,store);let ids:string[];
- if(opts.url){const page=await fetchDocument(opts.url);ids=[store.addCompetition(normalizeUrl(opts.url),page.title)];}else ids=await discoverCompetitions(store,discoveryGateway,opts.query,cfg.sources);
+ if(opts.url){const page=await fetchDocument(opts.url);ids=[store.addCompetition(normalizeUrl(opts.url),page.title)];}else ids=await discoverCompetitions(store,discoveryGateway,opts.query,cfg.sources,cfg.search);
  let added=0;for(const id of ids)if(store.enqueue(id,!!opts.redo))added++;const queued=store.queue().filter((x:any)=>x.state==='queued'||x.state==='processing').length;console.log(`发现 ${ids.length} 个赛事候选，新入队 ${added} 个；队列中 ${queued} 个等待或正在处理，本次最多处理 ${opts.limit} 个。候选并不保证仍可报名。`);if(!queued){print({discovered:ids.length,enqueued:added,processed:[],note:ids.length?'已处理过所有候选；使用 --redo 可重新处理':'未发现赛事；请检查搜索服务或稍后重试'});if(!ids.length)process.exitCode=1;return;}
  const results=await workQueue(cfg,store,opts);print({discovered:ids.length,enqueued:added,processed:results});if(results.some(x=>x.error))process.exitCode=1;
  }finally{store.close();}

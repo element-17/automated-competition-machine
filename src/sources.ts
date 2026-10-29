@@ -2,7 +2,7 @@ import { load } from 'cheerio';
 import { readFile } from 'node:fs/promises';
 import { extname } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import type { Evidence, ModelGateway } from './types.js';
+import type { Evidence, ModelGateway, SearchOptions } from './types.js';
 import type { Store } from './store.js';
 async function pdfText(bytes:Buffer):Promise<string>{const pdfjs=await import('pdfjs-dist/legacy/build/pdf.mjs');const task=pdfjs.getDocument({data:Uint8Array.from(bytes),useSystemFonts:true});const doc=await task.promise;try{const pages=[];for(let i=1;i<=doc.numPages;i++){const page=await doc.getPage(i);const content=await page.getTextContent();pages.push(content.items.map(x=>'str'in x?x.str:'').join(' '));}return pages.join('\n');}finally{await doc.destroy();}}
 
@@ -24,4 +24,4 @@ export async function fetchDocument(input:string):Promise<{url:string,title:stri
 }
 export async function readSource(path:string):Promise<string> { const ext=extname(path).toLowerCase(); const data=await readFile(path); if(data.length>15_000_000) throw Error('输入文件超过 15 MB'); if(['.txt','.md'].includes(ext)) return data.toString('utf8'); if(ext==='.pdf') return pdfText(data); if(ext==='.docx') { const mammoth=await import('mammoth'); return (await mammoth.extractRawText({buffer:data})).value; } throw Error(`暂不支持原文格式 ${ext}；可使用 txt、md、docx、pdf`); }
 export async function saveSource(store:Store,id:string,url:string,kind:string,titleHint?:string):Promise<Evidence> { try {const doc=await fetchDocument(url); const e={id:randomUUID(),competitionId:id,url:doc.url,title:doc.title===doc.url&&titleHint?titleHint:doc.title,text:doc.text,fetchedAt:new Date().toISOString(),kind}; store.putEvidence(e);store.sourceAttempt(id,url,kind); return e;}catch(e){store.sourceAttempt(id,url,kind,e instanceof Error?e.message:String(e));throw e;} }
-export async function searchLogged(store:Store,gateway:ModelGateway,id:string|null,query:string) { if(gateway.canSearch===false){store.search(id,query,[],'来源列表模式未配置全网关键词搜索');return [];}try {const results=await gateway.search(query); store.search(id,query,results); return results;}catch(e){const error=e instanceof Error?e.message:String(e);store.search(id,query,[],error);console.error(`搜索失败（${query}）：${error}`);return []; } }
+export async function searchLogged(store:Store,gateway:ModelGateway,id:string|null,query:string,options?:SearchOptions) { if(gateway.canSearch===false){store.search(id,query,[],'来源列表模式未配置全网关键词搜索');return [];}try {const results=await (options?gateway.search(query,options):gateway.search(query)); store.search(id,query,results); return results;}catch(e){const error=e instanceof Error?e.message:String(e);store.search(id,query,[],error);console.error(`搜索失败（${query}）：${error}`);return []; } }

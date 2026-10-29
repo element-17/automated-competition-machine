@@ -36,7 +36,9 @@ node dist/cli.js doctor
 {"provider":"searxng","url":"http://127.0.0.1:8080"}
 ```
 
-SearXNG 服务须启用 JSON 输出。可在 `sources` 中配置赛事列表页；系统同时搜索并读取这些页面。使用 `scan --url` 导入公告不需要搜索密钥。旧配置中的 OpenCode 地址、密码和 `searchProvider` 不再生效，请参考新示例配置迁移。
+SearXNG 服务须启用 JSON 输出（`settings.yml` 的 `search.formats` 加入 `json`）。可在 `sources` 中配置赛事列表页；系统同时搜索并读取这些页面。
+
+赛事发现的可选参数（均有默认值）：`pages` 每个搜索词翻几页（默认 2），`timeRange` 时间范围 `any/day/week/month/year`（默认 `year`，只用于发现，研究往届资料不限时间），`language`（默认 `zh-CN`，仅 SearXNG），`perHost` 每个网站每次最多新增几场（默认 4），`queriesPerRun` 每次使用几个搜索词（默认 8），`queries` 自定义搜索词。自定义搜索词每次都会使用，剩余名额从 20 个内置方向中按最久未搜索轮换。不同学校转发的同一届赛事（按“第 X 届……大赛”识别）只收录一条。`screen`（默认开启）在入队前让“搜索结果评估” Agent 用评审模型按每 20 条一批初筛标题和摘要，只剔除明显不是当届赛事公告的结果（百科、汇总页、获奖公示、新闻报道、广告等），拿不准的保留给队列审核；剔除理由记录在发现记录中，已剔除的链接以后不再评估。评估失败时全部保留，不会阻断发现。以上设置、测试搜索和最近发现记录都可以在交互界面的“搜索设置”中查看和修改。使用 `scan --url` 导入公告不需要搜索密钥。旧配置中的 OpenCode 地址、密码和 `searchProvider` 不再生效，请参考新示例配置迁移。
 
 也可设置 `"search":{"provider":"sources"}`，只监测 `sources` 中配置的高校通知列表，不需要搜索密钥。此模式不是全网搜索，不支持 `--query`，不能追查不在这些页面及公告链接中的往届作品；研究结果会记录检索范围受限。各校公告可能仅限本校参赛，也可能已经过期，入队前后仍须核验。
 
@@ -68,6 +70,18 @@ node dist/cli.js enqueue --all
 node dist/cli.js auto --limit 3 --budget 40
 node dist/cli.js auto --url 'https://主办方公告地址' --budget 40
 ```
+
+### Agent 系统提示词
+
+六个 Agent 都有内置系统提示词：`writer` 写作、`reviewer` 评审与审核、`screener` 搜索结果评估（使用评审模型）、`research` 研究 Agent、`coder` 软件制作、`image` 图片生成。在交互界面选择“Agent 提示词”可以查看、在编辑器中修改或恢复默认；编辑器默认使用 `EDITOR` 环境变量，Windows 上未设置时用记事本。也可以用命令：
+
+```powershell
+node dist/cli.js prompts            # 查看全部
+node dist/cli.js prompt-set writer --file my-writer.txt
+node dist/cli.js prompt-reset writer
+```
+
+修改保存在配置文件的 `prompts` 字段，下次调用对应 Agent 时生效。写作、评审、搜索结果评估和研究 Agent 通过各自 SDK 的系统提示词通道传入；Codex 和图片模型没有该通道，提示词加在任务内容前面。各任务提示词里的防注入、禁止编造约束和输出格式要求是固定的，不受这里的修改影响。
 
 `research <赛事ID>` 可单独研究，`show <赛事ID>` 查看档案与来源。手动 `produce` 支持翻译和报告，使用 `node dist/cli.js produce --help` 查看参数；不属于队列的失败任务可用 `resume <任务ID> --budget 40` 恢复。
 
