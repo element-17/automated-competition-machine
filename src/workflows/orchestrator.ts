@@ -178,7 +178,7 @@ export async function planWork(cfg:AppConfig,store:Store,gateway:ModelGateway,in
   const key=taskInputHash({policy:3,hasSource},{brief,idea,evidence,selection:input.selection,model:modelLabel(cfg,'planner'),prompts:cfg.prompts});
   const result=await cached(cfg,store,jobId,`plan-${key}.json`,PlanRecord,modelLabel(cfg,'planner'),async()=>{
     const base=`${Guard}\n把这项比赛的参赛作品拆解成可以实际制作的文件任务。\n${capabilities}\n要求：
-1. brief.deliverables 中每个交付物（下标从 0 开始）至少对应一个任务；一个交付物可以拆成多个文件，例如“参赛作品压缩包（含作品文件、原创承诺书）”应拆为作品本体（如 software 或 slides）、作品说明 document、原创承诺书 document，再用 packages 打包。打包由系统完成：不要安排“打包/压缩”任务，各任务也拿不到彼此的文件。
+1. brief.deliverables 中每个交付物（下标从 0 开始）至少对应一个任务；一个交付物可以拆成多个文件，例如“参赛作品压缩包（含作品文件、原创承诺书）”应拆为作品本体（如 software 或 slides）、作品说明 document、原创承诺书 document，再用 packages 打包。打包由系统完成：不要安排“打包/压缩”任务，各任务也拿不到彼此的文件。全部任务完成后，系统还会把所有要提交的文件汇总成一个最终提交包，所以也不要安排汇总全部文件的任务。
 2. 必须遵守交付物指定格式；只有 ZIP 交付物的内部文件可以使用其他格式，packages 只能包含同一 deliverable 的任务。交付物没写格式时，按赛道和评分标准选择真实产物并标明格式待确认；只有确实无法制作时才用 supporting。
 3. 每个任务的 acceptance 写 2-8 条可以从产物本身检查的验收标准（内容、结构、页数/字数、命名、功能）。
 4. instructions 要具体：紧扣选定方案和评分要求，写清楚要包含哪些部分/页面/功能。需要姓名、学校、签名等个人信息的地方要求留空待填。只安排要提交给主办方的文件；给作者看的待补资料清单、投稿事务清单、格式核对清单不要单独安排任务，系统会把各任务登记的待补资料自动汇总成文件交给用户。
@@ -466,6 +466,9 @@ async function buildPackages(ctx:Ctx,plan:Plan,results:TaskResult[]):Promise<(De
   return out;
 }
 
+/** 最后一步：把所有要提交的文件按交付物分目录汇总成一个最终提交包；总共不到两个文件时不需要。 */
+async function buildFinalBundle(ctx:Ctx,results:TaskResult[],packages:(DeliverableResult&{deliverable:number})[],packaged:Set<string>):Promise<{path:string;draft:boolean}|null>{const zip=new JSZip();const names=new Set<string>();let draft=false;const items=[...results.filter(r=>!packaged.has(r.id)),...packages];for(const r of items){if(r.status!=='submission'&&r.status!=='draft')continue;if(r.status==='draft')draft=true;const dir=`${r.deliverable+1}-${safeName(ctx.brief.deliverables[r.deliverable]?.type||'作品')}`;for(const p of r.artifactPaths){const base=p.split(/[\\/]/).pop()!;let name=`${dir}/${base}`;for(let n=2;names.has(name);n++)name=`${dir}/${n}-${base}`;names.add(name);zip.file(name,await readFile(p));}}if(names.size<2)return null;const folder=join(jobDir(ctx),'final');await mkdir(folder,{recursive:true});const path=join(folder,`${safeName(ctx.competitionTitle).slice(0,40)}-最终提交包.zip`);await writeFile(path,await zip.generateAsync({type:'nodebuffer'}));return {path,draft};}
+
 /* ---------- 入口 ---------- */
 const Progress=z.record(z.string(),z.any());
 /** 规划 → 制作与验收 → 打包；只有输入和产物收据均匹配才复用已完成任务。 */
@@ -531,6 +534,9 @@ export async function runOrchestration(cfg:AppConfig,store:Store,gateway:ModelGa
     const text=`# 需要你提供的资料\n\n以下资料只有你能提供，模型无法核实，所以没有写进作品，在作品里对应位置标了【待补充】。补齐后替换这些标记，或把资料发给我重新生成。\n\n${requests.map(r=>`## ${r.title}\n\n${r.items.map(x=>`- [ ] ${x}`).join('\n')}`).join('\n\n')}\n`;
     outputs.push(await record(cfg,store,jobId,'需要你提供的资料.md',text,null));
   }
+  // 全部任务完成后，把所有要交付的文件汇总成一个最终提交包，放在输出列表最前面。
+  const finalBundle=await buildFinalBundle(ctx,results,packages,packaged);
+  if(finalBundle){outputs.unshift(finalBundle.path);if(finalBundle.draft)gaps.push('最终提交包含未通过验收的草稿');}
   for(const r of [...results,...packages])gaps.push(...r.gaps);
   const deliverables:DeliverableResult[]=[...results,...packages];
   for(const result of deliverables)if(result.status==='submission'||result.status==='draft')for(const path of result.artifactPaths)store.artifact(jobId,result.status,path,null);

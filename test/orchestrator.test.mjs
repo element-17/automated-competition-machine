@@ -229,7 +229,7 @@ test('未知命名及未核实字数要求写入产物检查记录，不能登�
 test('明确要求多份作品时修正规划，确定性回退也补齐最终文件数量',async()=>{
   const d=item('报告',['txt']);d.quantity='2份';const ctx=await setup(brief([d]));
   try{const g=documentGateway({tasks:[documentTask()]});const result=await runOrchestration(ctx.cfg,ctx.store,g,{jobId:ctx.job,competitionId:ctx.id,idea});
-    assert.equal(g.calls.plans,2);assert.equal(result.outputs.length,2);assert.ok(result.deliverables.every(d=>d.status==='submission'));assert.match(result.gaps.join(' '),/计划只有 1 个最终文件/);
+    assert.equal(g.calls.plans,2);assert.equal(result.outputs.filter(x=>!/最终提交包\.zip$/.test(x)).length,2);assert.match(result.outputs[0],/最终提交包\.zip$/,'两份作品会汇总成最终提交包');assert.ok(result.deliverables.every(d=>d.status==='submission'));assert.match(result.gaps.join(' '),/计划只有 1 个最终文件/);
   }finally{await ctx.done();}
 });
 
@@ -470,5 +470,22 @@ test('图片模型拒绝某个画面时只返工这张图，不中止整个任�
         throw Error('unexpected');}};
     const result=await runOrchestration(ctx.cfg,ctx.store,g,{jobId:ctx.job,competitionId:ctx.id,idea});
     assert.equal(draws,2);assert.match(briefs[1],/图片模型拒绝了上一版画面描述/);assert.equal(result.deliverables[0].review.pass,true);
+  }finally{await ctx.done();}
+});
+
+test('最后一步把所有交付物汇总成一个最终提交包，按交付物分目录',async()=>{
+  const ctx=await setup(brief([item('方案报告',['docx']),item('展示PPT',['pptx'])]));
+  try{
+    const g={search:async()=>[],generate:async(role,prompt)=>{
+      if(prompt.includes('拆解成可以实际制作的文件任务'))return JSON.stringify({tasks:[{id:'report',deliverable:0,title:'方案报告',kind:'document',format:'docx',instructions:'写方案',acceptance:['有方案']},{id:'deck',deliverable:1,title:'展示PPT',kind:'slides',format:'pptx',instructions:'展示',acceptance:['有封面']}],packages:[]});
+      if(prompt.includes('独立作品验收评审'))return JSON.stringify({issues:[]});
+      if(prompt.includes('直接创作'))return JSON.stringify(prompt.includes('任务：展示PPT')?{kind:'slides',title:'展示',sources:[],slides:[{background:'FFFFFF',elements:[{type:'text',text:'封面',x:0.5,y:0.5,w:6,h:1,fontSize:28}]}]}:{kind:'text',title:'方案报告',text:'## 方案\n正文',sources:[]});
+      throw Error('unexpected '+prompt.slice(0,40));}};
+    const result=await runOrchestration(ctx.cfg,ctx.store,g,{jobId:ctx.job,competitionId:ctx.id,idea});
+    assert.match(result.outputs[0],/最终提交包\.zip$/,'最终包排在输出最前');
+    const names=Object.keys((await JSZip.loadAsync(await readFile(result.outputs[0]))).files);
+    assert.ok(names.some(n=>/^1-方案报告\/.+\.docx$/.test(n)),names.join(','));
+    assert.ok(names.some(n=>/^2-展示PPT\/.+\.pptx$/.test(n)),names.join(','));
+    assert.ok(!names.some(n=>n.includes('需要你提供的资料')),'待补资料不进提交包');
   }finally{await ctx.done();}
 });
