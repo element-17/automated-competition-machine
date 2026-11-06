@@ -347,6 +347,12 @@ async function verify(ctx:Ctx,task:PlanTask,attempt:Attempt):Promise<Verdict|nul
   }catch(e){const m=message(e);if(isJobControlError(e)||budgetError(m))throw e;return null;}
 }
 
+/** 待补资料去重：写作和评审常把同一项写成不同说法，被另一条完整包含的短条目并入长条目。 */
+export function mergeRequests(items:string[]):string[]{
+  const key=(x:string)=>x.replace(/[\s，,。.、；;：:（）()【】\[\]“”"'-]/g,'');
+  const unique=[...new Map(items.map(x=>x.trim()).filter(Boolean).map(x=>[key(x),x])).values()];
+  return unique.filter(x=>!unique.some(y=>y!==x&&key(y).length>key(x).length&&key(y).includes(key(x))));
+}
 /** 默认值；每个任务的实际上限从 execution.productionRounds 读取。 */
 export const maxRounds=4;
 type Check={id:string;status:'passed'|'failed'|'unverified';details:string[]};
@@ -383,7 +389,7 @@ export async function runTask(ctx:Ctx,task:PlanTask):Promise<TaskResult>{
   const done=(status:DeliverableStatus,attempt:Attempt,review:Verdict|null,rounds:number,gaps:string[],requirements:RequirementCheck[]=[]):TaskResult=>{
     const checks=[...acceptanceChecks(ctx,task,review,currentBrowser),...requirements];
     if(status==='submission'&&checks.some(c=>c.status!=='passed'))status='draft';
-    return {...base,status,artifactPaths:attempt.paths,review,rounds,checks,needsInput:[...new Set([...(attempt.needsInput||[]),...(review?.needs_input||[])])],gaps:[...new Set([...attempt.notes,...gaps,...checks.filter(c=>c.status!=='passed').flatMap(c=>c.details)])]};
+    return {...base,status,artifactPaths:attempt.paths,review,rounds,checks,needsInput:mergeRequests([...(attempt.needsInput||[]),...(review?.needs_input||[])]),gaps:[...new Set([...attempt.notes,...gaps,...checks.filter(c=>c.status!=='passed').flatMap(c=>c.details)])]};
   };
   let currentBrowser:BrowserReport|undefined;
   let feedback:string[]=[];let last:{attempt:Attempt;review:Verdict;requirements:RequirementCheck[]}|null=null;

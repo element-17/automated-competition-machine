@@ -452,3 +452,8 @@ test('只承认引用里写明的文件格式',async()=>{
   assert.deepEqual(formatsInQuote('请以 Word 格式提交'),['docx']);assert.deepEqual(formatsInQuote('作品打包为压缩包，附 PDF 说明'),['pdf','zip']);
   assert.deepEqual(formatsInQuote('稿件字数不少于 3000 字'),[]);
 });
+
+test('待补资料清单合并重复和互相包含的条目',async()=>{
+  const {mergeRequests}=await import('../dist/workflows/orchestrator.js');
+  assert.deepEqual(mergeRequests(['作者姓名','作者姓名、单位及院系：用于题名页','作者姓名','实测开启力数据']),['作者姓名、单位及院系：用于题名页','实测开启力数据']);
+});
