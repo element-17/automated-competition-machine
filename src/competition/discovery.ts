@@ -1,9 +1,9 @@
-import { searchSettings, type SearchSettings } from './config.js';
-import type { Store } from './store.js';
-import type { ModelGateway, SearchResult } from './types.js';
+import { searchSettings, type SearchSettings } from '../core/config.js';
+import type { Store } from '../core/store.js';
+import type { ModelGateway, SearchResult } from '../core/types.js';
 import { searchLogged, fetchDocument } from './sources.js';
 import { z } from 'zod';
-import { parseJSON } from './gateway.js';
+import { parseJSON } from '../core/gateway.js';
 import { todayChina } from './screening.js';
 
 export const isCompetitionCandidate=(title:string)=>!/获奖名单|获奖公告|评审结果|圆满落幕|获奖公示|比赛结果|入围名单|评审公示|竞赛平台|竞赛导航|比赛大全|赛事大全|竞赛汇总|竞赛资讯|竞赛榜单|竞赛信息网|竞赛网|赛事平台|大赛平台|竞赛中心首页|竞赛归档|赛事归档|报名系统|报名平台|竞赛列表|赛事列表|竞赛分类|赛事专区|竞赛专区/.test(title)&&/竞赛|比赛|大赛|挑战赛|征文|征稿|作品征集/.test(title);

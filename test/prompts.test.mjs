@@ -5,10 +5,10 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { OfficialGateway } from '../dist/gateway.js';
-import { Store } from '../dist/store.js';
-import { savePrompt, loadConfig } from '../dist/config.js';
-import { defaultPrompts, promptOf } from '../dist/prompts.js';
+import { OfficialGateway } from '../dist/core/gateway.js';
+import { Store } from '../dist/core/store.js';
+import { savePrompt, loadConfig } from '../dist/core/config.js';
+import { defaultPrompts, promptOf } from '../dist/agents/prompts.js';
 
 const base=dir=>({dataDir:dir,writer:{providerID:'google',id:'gemini-test'},reviewer:{providerID:'anthropic',id:'claude-test'},image:{providerID:'google',id:'gemini-image'},coder:{id:'codex-test'},researchAgent:{enabled:true,maxTurns:2,maxBudgetUsd:0.5},search:{provider:'sources'},profile:{},sources:[],maxCalls:30,prompts:{}});
 function env(values){const previous=Object.fromEntries(Object.keys(values).map(k=>[k,process.env[k]]));for(const [k,v] of Object.entries(values))process.env[k]=v;return ()=>{for(const [k,v] of Object.entries(previous))if(v===undefined)delete process.env[k];else process.env[k]=v;};}

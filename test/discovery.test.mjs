@@ -3,10 +3,10 @@ import assert from 'node:assert/strict';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { Store } from '../dist/store.js';
-import { OfficialGateway } from '../dist/gateway.js';
-import { discoverCompetitions, competitionKey, plannedQueries, builtinQueries, SCREEN_RECORD } from '../dist/discovery.js';
-import { saveSearchConfig, searchDefaults } from '../dist/config.js';
+import { Store } from '../dist/core/store.js';
+import { OfficialGateway } from '../dist/core/gateway.js';
+import { discoverCompetitions, competitionKey, plannedQueries, builtinQueries, SCREEN_RECORD } from '../dist/competition/discovery.js';
+import { saveSearchConfig, searchDefaults } from '../dist/core/config.js';
 
 async function temp(){const dir=await mkdtemp(join(tmpdir(),'discovery-'));return {dir,store:new Store(dir)};}
 

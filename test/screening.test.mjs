@@ -4,9 +4,9 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createServer } from 'node:http';
-import { Store } from '../dist/store.js';
-import { screenQueue } from '../dist/screening.js';
-import { processQueue } from '../dist/queue.js';
+import { Store } from '../dist/core/store.js';
+import { screenQueue } from '../dist/competition/screening.js';
+import { processQueue } from '../dist/competition/queue.js';
 
 test('审核逐字核对证据、持久化结果，并阻止未通过赛事进入制作',async()=>{const dir=await mkdtemp(join(tmpdir(),'screening-'));const store=new Store(dir);const server=createServer((req,res)=>{res.setHeader('content-type','text/html; charset=utf-8');res.end(req.url==='/expired'?'<title>比赛通知</title><p>报名截止2020年10月23日。</p>':'<title>比赛通知</title><p>报名截止2099年12月31日。</p>');});await new Promise(r=>server.listen(0,'127.0.0.1',r));try{const base=`http://127.0.0.1:${server.address().port}`;const good=store.addCompetition(`${base}/good`,'有效比赛'),bad=store.addCompetition(`${base}/bad`,'虚构证据'),expired=store.addCompetition(`${base}/expired`,'过期比赛');for(const id of [good,bad,expired])store.enqueue(id);const gateway={search:async()=>[],generate:async(_role,prompt)=>{const url=prompt.includes(`${base}/expired`)?`${base}/expired`:prompt.includes(`${base}/bad`)?`${base}/bad`:`${base}/good`;const quote=url.endsWith('/bad')?'捏造的比赛通知截止日期':url.endsWith('/expired')?'报名截止2020年10月23日':'报名截止2099年12月31日';return JSON.stringify({decision:'valid',reason:'公告说明了报名时间',deadline:url.endsWith('/expired')?'2020-10-23':'2099-12-31',source_url:url,quote});}};const cfg={reviewer:{providerID:'deepseek',id:'test'},profile:{}};const reviewed=await screenQueue(cfg,store,gateway,{limit:3});assert.deepEqual(reviewed.map(x=>x.decision),['valid','needs_review','invalid']);assert.equal(store.queueReviewHistory(good).length,1);const processed=[];await processQueue(store,{limit:3,budget:10,run:async task=>{processed.push(task.competitionId);store.setJob(task.jobId,'completed');return {};}});assert.deepEqual(processed,[good]);assert.equal(store.queue().find(x=>x.competitionId===bad).state,'queued');assert.equal(store.queue().find(x=>x.competitionId===expired).reviewStatus,'invalid');}finally{server.close();store.close();await rm(dir,{recursive:true,force:true});}});
 

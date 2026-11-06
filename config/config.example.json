@@ -1,12 +1,16 @@
 {
   "dataDir": "./data",
-  "writer": { "providerID": "google", "id": "gemini-2.5-pro" },
-  "reviewer": { "providerID": "anthropic", "id": "claude-sonnet-4-5" },
-  "coder": { "id": "gpt-5.4" },
-  "researchAgent": { "enabled": true, "maxTurns": 4, "maxBudgetUsd": 1 },
+  "providers": [],
+  "agents": {
+    "writer": { "provider": "google", "model": "gemini-2.5-pro" },
+    "reviewer": { "provider": "anthropic", "model": "claude-sonnet-4-5" },
+    "research": { "provider": "google", "model": "gemini-2.5-flash", "runtime": "opencode", "enabled": true, "maxTurns": 8, "maxBudgetUsd": 1, "timeoutSeconds": 1200 },
+    "coder": { "provider": "openai", "model": "gpt-5.4", "runtime": "codex", "maxTurns": 20, "timeoutSeconds": 1200 },
+    "image": { "provider": "google", "model": "gemini-2.5-flash-image" }
+  },
   "search": { "provider": "searxng", "url": "http://127.0.0.1:8080", "pages": 2, "timeRange": "year", "language": "zh-CN", "perHost": 4, "queriesPerRun": 8, "queries": [], "screen": true },
-  "image": { "providerID": "google", "id": "gemini-2.5-flash-image" },
-  "maxCalls": 12,
+  "execution": { "productionRounds": 4, "plannerRounds": 3, "researchRounds": 3, "requestTimeoutSeconds": 300 },
+  "maxCalls": 80,
   "sources": ["https://jsjds.blcu.edu.cn/"],
   "profile": { "school": "", "identity": "" }
 }

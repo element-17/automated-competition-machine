@@ -1,10 +1,11 @@
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
-import type { Store } from './store.js';
-import type { ModelGateway } from './types.js';
-import type { AppConfig } from './config.js';
+import type { Store } from '../core/store.js';
+import type { ModelGateway } from '../core/types.js';
+import type { AppConfig } from '../core/config.js';
 import { fetchDocument, saveSource } from './sources.js';
-import { parseJSON } from './gateway.js';
+import { parseJSON } from '../core/gateway.js';
+import { modelLabel } from '../agents/models.js';
 
 const Verdict=z.object({decision:z.enum(['valid','invalid','needs_review']),reason:z.string().min(1),deadline:z.string().nullable().default(null),source_url:z.string().nullable().default(null),quote:z.string().nullable().default(null)});
 type Entry={competitionId:string;title:string;url:string;state:string;reviewStatus:string};
@@ -20,11 +21,11 @@ export async function screenOne(cfg:AppConfig,store:Store,gateway:ModelGateway,i
  const verdict=Verdict.parse(parseJSON(await gateway.generate('reviewer',prompt)));const proof=verdict.quote&&verdict.source_url&&verdict.quote.trim().length>=5&&evidence.some(e=>e.url===verdict.source_url&&normalize(e.text).includes(normalize(verdict.quote!)));if(!proof&&verdict.decision!=='needs_review'){verdict.decision='needs_review';verdict.reason=`模型判断缺少可逐字核对的来源：${verdict.reason}`;verdict.quote=null;verdict.source_url=null;}
  const deadline=verdict.deadline&&/^\d{4}-\d{2}-\d{2}$/.test(verdict.deadline)&&!Number.isNaN(Date.parse(`${verdict.deadline}T00:00:00Z`))?verdict.deadline:null;
  if(verdict.decision==='valid'){const parts=deadline?.split('-').map(Number);const nums=(verdict.quote||'').match(/\d+/g)?.map(Number)||[];if(!deadline||!parts?.every(n=>nums.includes(n))||!/报名|投稿|作品.{0,5}(?:提交|征集)|提交.{0,5}作品/.test(verdict.quote||'')||/开始前|尚未开放|未开放报名/.test(verdict.reason)){verdict.decision='needs_review';verdict.reason=`报名或作品提交截止日期缺少可核对的原文，或尚未开放报名：${verdict.reason}`;}else if(deadline<todayChina()){verdict.decision='invalid';verdict.reason=`报名或作品提交截止日期 ${deadline} 已过；${verdict.reason}`;}else if(deadline===todayChina()){verdict.decision='needs_review';verdict.reason=`截止日期是今天，请核实具体时刻：${verdict.reason}`;}}
- const review={decision:verdict.decision,reason:verdict.reason,sourceUrl:verdict.source_url,quote:verdict.quote,deadline,reviewer:`${cfg.reviewer.providerID}/${cfg.reviewer.id}`};store.setQueueReview(item.competitionId,review,{url:item.url,title:item.title});return review;
+ const review={decision:verdict.decision,reason:verdict.reason,sourceUrl:verdict.source_url,quote:verdict.quote,deadline,reviewer:modelLabel(cfg,'reviewer')};store.setQueueReview(item.competitionId,review,{url:item.url,title:item.title});return review;
 }
 
 /** 使用与队列处理共享的租约，避免多进程重复审查或同时处理。 */
-export async function screenQueue(cfg:AppConfig,store:Store,gateway:ModelGateway,options:{limit:number;id?:string;force?:boolean;onStart?:(item:Entry)=>void;onResult?:(item:Entry,decision:string)=>void}){
+export async function screenQueue(cfg:AppConfig,store:Store,gateway:ModelGateway,options:{limit:number;id?:string;force?:boolean;onStart?:(item:Entry)=>void;onResult?:(item:Entry,decision:string)=>void;onError?:(item:Entry,error:string)=>void}){
  if(!Number.isInteger(options.limit)||options.limit<1)throw Error('审核数量必须为正整数');const owner=randomUUID(),lease=300_000;store.acquireWorker(owner,lease);const heartbeat=setInterval(()=>{try{store.heartbeatWorker(owner,lease);}catch{}},15_000);heartbeat.unref();const results:{competitionId:string;decision:string;reason:string}[]=[];
- try{store.expireQueueReviews(todayChina());const items=(store.queue() as Entry[]).filter(x=>x.state==='queued'&&(!options.id||x.competitionId===options.id)&&(options.force||x.reviewStatus==='unreviewed')).slice(0,options.limit);for(const item of items){options.onStart?.(item);try{const review=await screenOne(cfg,store,gateway,item);results.push({competitionId:item.competitionId,decision:review.decision,reason:review.reason});options.onResult?.(item,review.decision);}catch(e){const message=e instanceof Error?e.message:String(e);try{store.setQueueReview(item.competitionId,{decision:'needs_review',reason:`自动审核失败：${message}`,reviewer:`${cfg.reviewer.providerID}/${cfg.reviewer.id}`},{url:item.url,title:item.title});}catch{}results.push({competitionId:item.competitionId,decision:'needs_review',reason:message});options.onResult?.(item,'needs_review');if(/模型.*调用失败|第二模型.*失败|缺少.*API_KEY/.test(message))break;}}return results;}finally{clearInterval(heartbeat);store.releaseWorker(owner);}
+ try{store.expireQueueReviews(todayChina());const items=store.queueReviewCandidates(options.limit,options.id,options.force) as Entry[];for(const item of items){options.onStart?.(item);try{const review=await screenOne(cfg,store,gateway,item);results.push({competitionId:item.competitionId,decision:review.decision,reason:review.reason});options.onResult?.(item,review.decision);}catch(e){const message=e instanceof Error?e.message:String(e);options.onError?.(item,message);try{store.setQueueReview(item.competitionId,{decision:'needs_review',reason:`自动审核失败：${message}`,reviewer:modelLabel(cfg,'reviewer')},{url:item.url,title:item.title});}catch{}results.push({competitionId:item.competitionId,decision:'needs_review',reason:message});options.onResult?.(item,'needs_review');}}return results;}finally{clearInterval(heartbeat);store.releaseWorker(owner);}
 }

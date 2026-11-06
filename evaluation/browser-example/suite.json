@@ -1,0 +1,22 @@
+{
+  "cases": [
+    {
+      "name": "添加任务后列表显示输入内容，输入框清空",
+      "criterion": 0,
+      "steps": [
+        { "action": "fill", "selector": "#task", "value": "核对赛事要求" },
+        { "action": "click", "selector": "#add" }
+      ],
+      "expect": [
+        { "selector": "#items", "text": "核对赛事要求" },
+        { "selector": "#task", "value": "" }
+      ]
+    },
+    {
+      "name": "空输入显示明确错误",
+      "criterion": 1,
+      "steps": [{ "action": "click", "selector": "#add" }],
+      "expect": [{ "selector": "#error", "text": "请输入任务名称" }]
+    }
+  ]
+}

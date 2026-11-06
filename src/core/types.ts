@@ -1,5 +1,6 @@
 import { z } from 'zod';
-import type { AgentName } from './prompts.js';
+import type { AgentName } from '../agents/prompts.js';
+import type { JobProgress } from './job-progress.js';
 
 export const Deliverable = z.object({ type: z.string(), quantity: z.string().nullable().default(null), formats: z.array(z.string()).default([]), limits: z.array(z.string()).default([]), naming: z.string().nullable().default(null), attachments: z.array(z.string()).default([]), submission: z.string().nullable().default(null), official_template: z.string().nullable().default(null) });
 export const ResearchProof = z.object({url:z.string(),quote:z.string(),title:z.string().default('')});
@@ -10,5 +11,5 @@ export type Evidence = { id: string; competitionId: string; url: string; title: 
 export type ModelRole = 'writer' | 'reviewer';
 export type SearchResult = {url: string; title: string; snippet: string};
 export type SearchOptions = {pages?: number; timeRange?: 'any'|'day'|'week'|'month'|'year'};
-export interface ModelGateway { readonly canSearch?:boolean; generate(role: ModelRole, prompt: string, agent?: AgentName): Promise<string>; search(query: string, options?: SearchOptions): Promise<SearchResult[]>; investigate?(prompt:string):Promise<{text:string;sessionId:string;events:unknown[]}>; buildProject?(workspace:string,prompt:string):Promise<void>; generateImage?(prompt:string):Promise<{data:Buffer,mime:string}>; }
+export interface ModelGateway { readonly canSearch?:boolean; reportProgress?(event:JobProgress):Promise<void>; generate(role: ModelRole, prompt: string, agent?: AgentName): Promise<string>; search(query: string, options?: SearchOptions): Promise<SearchResult[]>; investigate?(prompt:string):Promise<{text:string;sessionId:string;events:unknown[]}>; buildProject?(workspace:string,prompt:string):Promise<void>; generateImage?(prompt:string):Promise<{data:Buffer,mime:string}>; inspectImage?(prompt:string,image:{data:Buffer;mime:string},agent?:AgentName):Promise<string>; }
 export type Job = { id: string; competitionId: string; kind: string; state: string; createdAt: string; updatedAt: string; input: Record<string, unknown>; result: Record<string, unknown> | null; error: string | null; calls: number; maxCalls: number };

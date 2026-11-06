@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>浏览器验收示例</title>
+<style>
+body{font-family:system-ui,sans-serif;margin:0;padding:24px;background:#f3f5f7;color:#202b3a}
+main{max-width:520px;margin:40px auto;background:white;padding:24px;border-radius:12px}
+input,button{box-sizing:border-box;font:inherit;padding:10px}input{width:100%;margin:12px 0}button{background:#2458bd;color:white;border:0;border-radius:6px}
+li{margin:12px 0;overflow-wrap:anywhere}#error{color:#a52727}
+</style>
+<main>
+<h1>任务清单</h1><p>这是离线验收示例，不是真实参赛作品。</p>
+<label for="task">任务名称</label><input id="task" autocomplete="off">
+<button id="add" type="button">添加任务</button><p id="error" role="alert"></p>
+<ul id="items" aria-live="polite"></ul>
+</main>
+<script>
+document.querySelector('#add').addEventListener('click',()=>{
+ const input=document.querySelector('#task');const value=input.value.trim();
+ document.querySelector('#error').textContent=value?'':'请输入任务名称';if(!value)return;
+ const item=document.createElement('li');item.textContent=value;document.querySelector('#items').append(item);input.value='';
+});
+</script>
+</html>

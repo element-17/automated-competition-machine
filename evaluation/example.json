@@ -1,0 +1,13 @@
+{
+  "cases": [{
+    "id": "offline-delivery-example",
+    "brief": {
+      "title": "离线检查演示（非真实比赛评测）",
+      "deliverables": [{"type":"报告","formats":["txt"],"quantity":"1份","naming":"report.txt","limits":["文件大小不超过1KB"]}]
+    },
+    "runs": [
+      {"name":"fixture-with-file","files":[{"deliverable":0,"path":"report.txt"}]},
+      {"name":"fixture-missing-file","files":[]}
+    ]
+  }]
+}
