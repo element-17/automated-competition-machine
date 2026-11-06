@@ -401,12 +401,15 @@ export async function runTask(ctx:Ctx,task:PlanTask):Promise<TaskResult>{
     let attempt:Attempt;
     try{attempt=checkpoint?.attempt||await produce(ctx,task,round,feedback);}
     catch(e){
-      const m=message(e);if(isJobControlError(e)||fatal(m))throw e;
+      const m=message(e);
+      // 图片模型拒绝某个画面（HTTP 4xx，非限流）是这一张图的问题，不能中止整个任务；下一轮让写作 Agent 改写画面描述。
+      const refused=task.kind==='image'&&/图片模型调用失败：HTTP 4(?!29)\d\d/.test(m);
+      if(isJobControlError(e)||(fatal(m)&&!refused))throw e;
       if(e instanceof Blocked||configError(m)||round===rounds-1){
         if(last)return done('draft',last.attempt,last.review,round,[`${task.title} 返工失败（${m}），保留上一版草稿；未解决：${last.review.issues.join('；')}`],last.requirements);
         return {...await supporting(ctx,task,`${task.title} 制作失败：${m}`),kind:task.kind,format:task.format};
       }
-      feedback=[`上一次制作失败：${m}`];continue;
+      feedback=[refused?`图片模型拒绝了上一版画面描述（${m.slice(0,160)}）。改写成单一的产品渲染画面：不要标注、尺寸、文字、CAD 或工程图说法，用外观、材质、光线和视角描述结构。`:`上一次制作失败：${m}`];continue;
     }
     const direct=ctx.plan.tasks.filter(t=>t.deliverable===task.deliverable).length===1&&!ctx.plan.packages.some(p=>p.deliverable===task.deliverable);
     const filename=direct?fixedFileName(item?.naming):null;

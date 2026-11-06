@@ -457,3 +457,18 @@ test('待补资料清单合并重复和互相包含的条目',async()=>{
   const {mergeRequests}=await import('../dist/workflows/orchestrator.js');
   assert.deepEqual(mergeRequests(['作者姓名','作者姓名、单位及院系：用于题名页','作者姓名','实测开启力数据']),['作者姓名、单位及院系：用于题名页','实测开启力数据']);
 });
+
+test('图片模型拒绝某个画面时只返工这张图，不中止整个任务',async()=>{
+  const ctx=await setup(brief([item('效果图',['png'])]));
+  try{let draws=0;const briefs=[];
+    const g={search:async()=>[],
+      generateImage:async()=>{draws++;if(draws===1)throw Error('图片模型调用失败：HTTP 400 目前无法在此对话中直接生成或编辑图片。');return {data:await sharp({create:{width:800,height:600,channels:3,background:'#336699'}}).png().toBuffer(),mime:'image/png'};},
+      generate:async(role,prompt)=>{
+        if(prompt.includes('拆解成可以实际制作的文件任务'))return JSON.stringify({tasks:[documentTask({kind:'image',format:'png'})]});
+        if(prompt.includes('设计一张独特的图片作品')){briefs.push(prompt);return JSON.stringify({image_prompt:'产品渲染',caption:''});}
+        if(prompt.includes('独立作品验收评审'))return JSON.stringify({issues:[]});
+        throw Error('unexpected');}};
+    const result=await runOrchestration(ctx.cfg,ctx.store,g,{jobId:ctx.job,competitionId:ctx.id,idea});
+    assert.equal(draws,2);assert.match(briefs[1],/图片模型拒绝了上一版画面描述/);assert.equal(result.deliverables[0].review.pass,true);
+  }finally{await ctx.done();}
+});
