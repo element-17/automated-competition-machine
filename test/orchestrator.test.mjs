@@ -410,3 +410,11 @@ test('compete materials 导入用户资料，写作提示词把它当作可用�
     }finally{store.close();}
   }finally{await rm(dir,{recursive:true,force:true});}
 });
+
+test('评审输出不是有效 JSON 时重试一次，而不是记为未评审',async()=>{
+  const ctx=await setup(brief([item('方案报告',['docx'])]));
+  try{let reviews=0;const g={search:async()=>[],generate:async(role,prompt)=>{if(prompt.includes('拆解成可以实际制作的文件任务'))throw Error('规划不可用');if(prompt.includes('独立作品验收评审')){reviews++;return reviews===1?'{"issues":["被截断':JSON.stringify({issues:[]});}if(prompt.includes('直接创作'))return JSON.stringify({kind:'text',title:'报告',text:'正文',sources:[]});throw Error('unexpected');}};
+    const result=await runOrchestration(ctx.cfg,ctx.store,g,{jobId:ctx.job,competitionId:ctx.id,idea});
+    assert.equal(reviews,2);assert.equal(result.deliverables[0].review.pass,true);
+  }finally{await ctx.done();}
+});

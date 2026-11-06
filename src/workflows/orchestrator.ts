@@ -180,7 +180,7 @@ export async function planWork(cfg:AppConfig,store:Store,gateway:ModelGateway,in
 1. brief.deliverables 中每个交付物（下标从 0 开始）至少对应一个任务；一个交付物可以拆成多个文件，例如“参赛作品压缩包（含作品文件、原创承诺书）”应拆为作品本体（如 software 或 slides）、作品说明 document、原创承诺书 document，再用 packages 打包。打包由系统完成：不要安排“打包/压缩”任务，各任务也拿不到彼此的文件。
 2. 必须遵守交付物指定格式；只有 ZIP 交付物的内部文件可以使用其他格式，packages 只能包含同一 deliverable 的任务。交付物没写格式时，按赛道和评分标准选择真实产物并标明格式待确认；只有确实无法制作时才用 supporting。
 3. 每个任务的 acceptance 写 2-8 条可以从产物本身检查的验收标准（内容、结构、页数/字数、命名、功能）。
-4. instructions 要具体：紧扣选定方案和评分要求，写清楚要包含哪些部分/页面/功能。需要姓名、学校、签名等个人信息的地方要求留空待填。
+4. instructions 要具体：紧扣选定方案和评分要求，写清楚要包含哪些部分/页面/功能。需要姓名、学校、签名等个人信息的地方要求留空待填。只安排要提交给主办方的文件；给作者看的待补资料清单、投稿事务清单、格式核对清单不要单独安排任务，系统会把各任务登记的待补资料自动汇总成文件交给用户。
 5. 资料中${hasSource?'有':'没有'}比赛指定的翻译原文${hasSource?'':'，不能安排 translation 任务'}。
 只输出 JSON：{"tasks":[{"id":"小写字母数字和-","deliverable":0,"title":"","kind":"","format":"","instructions":"","acceptance":[""],"reason":"为何这样拆"}],"packages":[{"name":"按比赛命名规则的文件名.zip","deliverable":0,"includes":["任务id"]}],"notes":[""]}
 比赛档案：${JSON.stringify(brief)}\n选定方案：${JSON.stringify(idea)}\n选题比较及风险：${JSON.stringify(input.selection||null)}\n资料摘录：${JSON.stringify(evidence.slice(0,20).map(e=>({...e,text:e.text.slice(0,3000)})))}`;
@@ -328,7 +328,7 @@ async function browserVerify(ctx:Ctx,task:PlanTask,round:number,artifact:string)
 async function verify(ctx:Ctx,task:PlanTask,attempt:Attempt):Promise<Verdict|null>{
   const reviewText=attempt.reviewText||'';
   const rubric=`阻塞问题（issues）只包括：只有提纲或说明、没有实质作品内容；核心部分缺失或明显单薄；论证有硬伤或前后矛盾；编造实验、测试结果、采访、获奖或参考文献；违反赛事硬性规则；专业水准明显不足、难以拿奖。
-建议（suggestions）放：措辞、标点、章节编号、标题层级、格式、占位写法、数据有没有标来源、表述够不够严谨等细枝末节，以及可选的润色方向。建议不影响通过。不要建议增加“设计假设”“待核实”之类的标注或免责声明，设计参数和方案直接陈述即可。
+建议（suggestions）放：措辞、标点、章节编号、标题层级、格式、占位写法、数据有没有标来源、表述够不够严谨等细枝末节，以及可选的润色方向。建议不影响通过。不要建议增加“设计假设”“待核实”之类的标注或免责声明，也不要建议把肯定的表述改成“预期可”“设计目标为”“拟”之类的弱化说法，设计参数和方案直接陈述即可；【待补充】标记由系统统一处理，不要建议改写它们。
 需向用户索要的资料（needs_input）放：只有用户才能提供、模型无法核实的资料，如个人信息、实测数据、照片、调研结果、真实价格。缺这些不是作品缺陷，不要写进 issues，也不要要求作者在正文里加免责声明。
 只输出 JSON {"issues":["阻塞问题，写清位置、问题和改法"],"suggestions":["建议"],"needs_input":["需要用户提供的资料及用途"]}；没有阻塞问题时 issues 为空数组，即为通过。issues 最多 6 条、suggestions 最多 5 条，每条不超过 150 字，按严重程度排序。\n任务：${task.title}（${task.kind}/${task.format}）\n制作要求：${task.instructions}\n验收标准：${JSON.stringify(task.acceptance)}\n比赛档案：${JSON.stringify(ctx.brief)}`;
   const parse=async(raw:Promise<string>)=>Verdict.parse(parseJSON(await raw));
@@ -340,7 +340,9 @@ async function verify(ctx:Ctx,task:PlanTask,attempt:Attempt):Promise<Verdict|nul
       catch(e){if(isJobControlError(e)||budgetError(e))throw e;/* 评审模型不支持看图时退回到读设计说明。 */}
     }
     const imageNote=task.kind==='image'?'\n注意：你只能看到画面设计说明，看不到图片。只评审说明是否落实了要求；只能从画面判断的标准不要列为问题。':'';
-    return {...await parse(ctx.gateway.generate('reviewer',`${Guard}\n你是独立作品验收评审。只依据下面的实际产物内容，按评委的眼光严格检查作品质量。${imageNote}\n${rubric}\n产物内容：\n${reviewText.slice(0,40000)}`,'reviewer')),visual:false};
+    const textPrompt=`${Guard}\n你是独立作品验收评审。只依据下面的实际产物内容，按评委的眼光严格检查作品质量。${imageNote}\n${rubric}\n产物内容：\n${reviewText.slice(0,40000)}`;
+    // 评审输出偶尔被截断或不是 JSON；重试一次，仍失败才记为未评审。
+    for(let attempt=0;;attempt++){try{return {...await parse(ctx.gateway.generate('reviewer',attempt?`${textPrompt}\n\n上一次输出不是有效 JSON。只输出 JSON，issues、suggestions、needs_input 各不超过 5 条，每条不超过 120 字。`:textPrompt,'reviewer')),visual:false};}catch(e){if(attempt>=1||!/JSON|Zod|invalid|Expected/i.test(errorHead(e)))throw e;}}
   }catch(e){const m=message(e);if(isJobControlError(e)||budgetError(m))throw e;return null;}
 }
 
