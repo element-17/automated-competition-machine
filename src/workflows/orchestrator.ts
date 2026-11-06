@@ -25,6 +25,7 @@ import { previewSlides } from '../artifacts/preview.js';
 
 import { Guard, Idea, budgetError, errorHead, contents, record, cached, type DeliverableResult, type DeliverableStatus } from './shared.js';
 import { createSupportingArtifact } from '../artifacts/supporting.js';
+import { discoverFormats } from './formats.js';
 import { atomicWriteJson, checkTaskReceipt, createTaskReceipt, taskInputHash, type TaskReceipt } from './task-receipts.js';
 import { checkDelivery, checkLimits, fixedFileName, measureArtifact, parseBounds, type RequirementCheck } from '../artifacts/delivery-checks.js';
 export { Guard, Idea, contents, record, cached, type DeliverableResult, type DeliverableStatus };
@@ -460,7 +461,7 @@ async function buildPackages(ctx:Ctx,plan:Plan,results:TaskResult[]):Promise<(De
 const Progress=z.record(z.string(),z.any());
 /** 规划 → 制作与验收 → 打包；只有输入和产物收据均匹配才复用已完成任务。 */
 export async function runOrchestration(cfg:AppConfig,store:Store,gateway:ModelGateway,input:{jobId:string;competitionId:string;idea:Idea|null;selection?:unknown}){
-  const {jobId,competitionId,idea}=input;assertJobCanRun(store,jobId);gateway=controlledGateway(store,jobId,gateway);const c=store.competition(competitionId);const brief=c.brief as Brief;const evidence=contents(store,competitionId);
+  const {jobId,competitionId,idea}=input;assertJobCanRun(store,jobId);gateway=controlledGateway(store,jobId,gateway);const c=store.competition(competitionId);const brief=c.brief as Brief;let evidence=contents(store,competitionId);
   const gaps:string[]=[...brief.missing,...(brief.research?.missing||[])];
   let sourceText:string|null=null;
   if(brief.deliverables.some(d=>/translation|翻译|译文|译稿/i.test(d.type))){
@@ -468,6 +469,11 @@ export async function runOrchestration(cfg:AppConfig,store:Store,gateway:ModelGa
     catch(e){if(isJobControlError(e)||fatal(message(e)))throw e;}
     if(!sourceText)gaps.push('资料中没有找到比赛指定的翻译原文');
   }
+  // 公告没写格式时先搜索并核对官方要求；核对通过的格式写进赛事档案，作品才能成为投稿件。
+  const formatSearch=await discoverFormats(cfg,store,gateway,{jobId,competitionId,title:c.title,brief});
+  evidence=contents(store,competitionId);
+  const formatRequests=formatSearch.unresolved.map(i=>`「${brief.deliverables[i]?.type}」的提交文件格式：公告和搜索到的页面（${formatSearch.queries.join("；")}）都没有写明。请提供官方格式要求，例如通知附件或征文要求原文，用 compete materials 导入后重新生成`);
+  for(const r of formatSearch.resolved)gaps.push(`已从官方资料核实「${brief.deliverables[r.deliverable]?.type}」的格式：${r.formats.join("/")}（${r.url}）`);
   const planned=await planWork(cfg,store,gateway,{jobId,brief,idea,evidence,hasSource:!!sourceText,selection:input.selection});gaps.push(...planned.gaps);
   const inputContext={policy:5,brief,idea,evidence,sourceText,selection:input.selection,plan:planned.plan,prompts:cfg.prompts,models:['writer','reviewer','coder','image'].map(agent=>modelLabel(cfg,agent as AgentName))};
   const ctx:Ctx={cfg,store,gateway,jobId,competitionTitle:c.title,brief,idea,evidence,sourceText,plan:planned.plan,inputContext,selection:input.selection,images:{}};
@@ -511,6 +517,7 @@ export async function runOrchestration(cfg:AppConfig,store:Store,gateway:ModelGa
   const outputs=[...results.filter(r=>!packaged.has(r.id)||r.status==='supporting_material'||r.status==='blocked').flatMap(r=>r.artifactPaths),...packages.flatMap(p=>p.artifactPaths)];
   // 各任务登记的待补资料汇总成一个文件交给用户，不放进参赛压缩包，作品正文里也不再逐处解释。
   const requests=results.filter(r=>r.needsInput?.length).map(r=>({title:r.title,items:r.needsInput!}));
+  if(formatRequests.length)requests.unshift({title:"提交格式",items:formatRequests});
   if(requests.length){
     const text=`# 需要你提供的资料\n\n以下资料只有你能提供，模型无法核实，所以没有写进作品，在作品里对应位置标了【待补充】。补齐后替换这些标记，或把资料发给我重新生成。\n\n${requests.map(r=>`## ${r.title}\n\n${r.items.map(x=>`- [ ] ${x}`).join('\n')}`).join('\n\n')}\n`;
     outputs.push(await record(cfg,store,jobId,'需要你提供的资料.md',text,null));

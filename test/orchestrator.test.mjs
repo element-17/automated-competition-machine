@@ -418,3 +418,37 @@ test('评审输出不是有效 JSON 时重试一次，而不是记为未评审',
     assert.equal(reviews,2);assert.equal(result.deliverables[0].review.pass,true);
   }finally{await ctx.done();}
 });
+
+async function formatServer(html){const {createServer}=await import('node:http');const server=createServer((req,res)=>{res.setHeader('content-type','text/html; charset=utf-8');res.end(html);});await new Promise(r=>server.listen(0,'127.0.0.1',r));return {server,url:`http://127.0.0.1:${server.address().port}/notice`};}
+const formatGateway=(url,quote,writes)=>({search:async()=>[{url,title:'征文要求',snippet:''}],generate:async(role,prompt)=>{
+  if(prompt.includes('没有写提交文件格式'))return JSON.stringify({items:[{deliverable:0,formats:['docx'],url,quote}]});
+  if(prompt.includes('拆解成可以实际制作的文件任务'))throw Error('规划不可用');
+  if(prompt.includes('独立作品验收评审'))return JSON.stringify({issues:[]});
+  if(prompt.includes('直接创作')){writes.push(prompt);return JSON.stringify({kind:'text',title:'论文',text:'正文',sources:[]});}
+  throw Error('unexpected '+prompt.slice(0,40));}});
+
+test('公告没写格式时搜索官方要求，引用核对通过后作品成为投稿件',async()=>{
+  const {server,url}=await formatServer('<title>征文要求</title><p>论文请以 Word 格式提交，正文不少于 3000 字。</p>');
+  const ctx=await setup(brief([item('征文论文',[])]));
+  try{const writes=[];const result=await runOrchestration(ctx.cfg,ctx.store,formatGateway(url,'论文请以 Word 格式提交',writes),{jobId:ctx.job,competitionId:ctx.id,idea});
+    const d=result.deliverables[0];assert.equal(d.format,'docx');assert.equal(d.checks.find(c=>c.id==='format').status,'passed');assert.equal(d.status,'submission');
+    const saved=ctx.store.competition(ctx.id).brief;assert.deepEqual(saved.deliverables[0].formats,['docx']);assert.ok(saved.citations.some(c=>c.field==='deliverables.0.formats'&&c.url===url));
+    assert.ok(!result.outputs.some(x=>x.endsWith('需要你提供的资料.md')));
+  }finally{server.close();await ctx.done();}
+});
+
+test('格式引用在页面里找不到时不采纳，保持草稿并向用户索要格式要求',async()=>{
+  const {server,url}=await formatServer('<title>征文通知</title><p>欢迎投稿，具体要求见网盘附件。</p>');
+  const ctx=await setup(brief([item('征文论文',[])]));
+  try{const writes=[];const result=await runOrchestration(ctx.cfg,ctx.store,formatGateway(url,'论文请以 PDF 格式提交',writes),{jobId:ctx.job,competitionId:ctx.id,idea});
+    assert.deepEqual(ctx.store.competition(ctx.id).brief.deliverables[0].formats,[]);assert.notEqual(result.deliverables[0].status,'submission');
+    const file=result.outputs.find(x=>x.endsWith('需要你提供的资料.md'));assert.ok(file);
+    const text=await readFile(file,'utf8');assert.match(text,/## 提交格式/);assert.match(text,/征文论文/);assert.match(text,/compete materials/);
+  }finally{server.close();await ctx.done();}
+});
+
+test('只承认引用里写明的文件格式',async()=>{
+  const {formatsInQuote}=await import('../dist/workflows/formats.js');
+  assert.deepEqual(formatsInQuote('请以 Word 格式提交'),['docx']);assert.deepEqual(formatsInQuote('作品打包为压缩包，附 PDF 说明'),['pdf','zip']);
+  assert.deepEqual(formatsInQuote('稿件字数不少于 3000 字'),[]);
+});
