@@ -166,7 +166,7 @@ const capabilities=`可用的制作能力（kind → 可选 format → 执行者
 - document → docx/pdf/md/txt → 写作 Agent 撰写完整正文（论文、报告、方案书、作品说明书、承诺书等）
 - translation → docx/pdf/md/txt → 写作 Agent 翻译比赛提供的原文（仅当资料中有原文）
 - slides → pptx → 写作 Agent 设计并排版每页内容
-- image → png/jpg → 图片模型生成一张画面，写作 Agent 设计画面和图上少量文字。一个 image 任务只产出一张图；需要多张图（主视图、爆炸图、场景图等）就拆成多个 image 任务。图片模型不擅长排大量文字，信息图、流程图、对比表这类以文字为主的版面用 slides 或 document 制作
+- image → png/jpg → 图片模型生成一张画面，写作 Agent 设计画面和图上少量文字。图片模型画不出可读文字，image 任务的要求和验收标准里不要写编号标签、零件名、尺寸标注、图例文字，只写画面内容；需要标注的结构图用 slides 制作，在 PPT 里把图片和文字标注组合起来。一个 image 任务只产出一张图；需要多张图（主视图、爆炸图、场景图等）就拆成多个 image 任务。图片模型不擅长排大量文字，信息图、流程图、对比表这类以文字为主的版面用 slides 或 document 制作
 - software → zip/html → 编码 Agent 制作可在浏览器离线运行的完整网页软件（含 README）
 - supporting → md → 以上都做不了的（视频、实物硬件、音频、需要现场拍摄等），只写制作脚本/方案，作为兜底`;
 const PlanRecord=z.object({plan:Plan,source:z.enum(['planner','fallback']),gaps:z.array(z.string()).default([])});
@@ -226,7 +226,7 @@ export function targetLength(task:{instructions:string;acceptance:string[]}):num
 }
 /** 长文一次生成容易写短、各章深浅不一，超过这个字数就先列大纲再逐章写。 */
 export const longDocumentChars=6000;
-const Outline=z.object({title:z.string().min(1),sections:z.array(z.object({heading:z.string().min(1),points:z.array(z.string()).default([]),chars:z.number().int().min(200).max(6000).default(1500),rewrite:z.boolean().default(true)})).min(2).max(10),needs_input:z.array(z.string()).default([])});
+const Outline=z.object({title:z.string().min(1),facts:z.array(z.string()).default([]),sections:z.array(z.object({heading:z.string().min(1),points:z.array(z.string()).default([]),chars:z.number().int().min(200).max(6000).default(1500),rewrite:z.boolean().default(true)})).min(2).max(10),needs_input:z.array(z.string()).default([])});
 const Sections=z.object({outline:Outline,texts:z.array(z.string())});
 /** 分章写作：大纲一次调用，每章一次调用；返工时只重写评审意见涉及的章节，其余沿用上一版。 */
 async function writeLong(ctx:Ctx,task:PlanTask,round:number,feedback:string[],head:string,facts:string,target:number):Promise<Work>{
@@ -234,12 +234,12 @@ async function writeLong(ctx:Ctx,task:PlanTask,round:number,feedback:string[],he
   let previous:z.infer<typeof Sections>|null=null;
   if(round>0){try{previous=Sections.parse(JSON.parse(await readFile(join(jobDir(ctx),`${taskKey(ctx,task)}-r${round}-sections.json`),'utf8')));}catch(e){if((e as NodeJS.ErrnoException).code!=='ENOENT'&&!(e instanceof SyntaxError)&&!(e instanceof z.ZodError))throw e;}}
   const feedbackText=feedback.length?`上一版未通过评审，必须解决：\n${feedback.map((x,i)=>`${i+1}. ${x}`).join('\n')}\n`:'';
-  const outline=await cached(ctx.cfg,ctx.store,ctx.jobId,`${key}-outline.json`,Outline,label,async()=>parseJSON(await ctx.gateway.generate('writer',`${head}\n这份作品要求约 ${target} 字以上，分章写作。先只输出大纲 JSON：{"title":"作品标题","sections":[{"heading":"## 章节标题","points":["本章要写清楚的要点"],"chars":本章目标字数,"rewrite":true}],"needs_input":[]}。sections 4-8 个，chars 之和不少于 ${target}，按评分要点分配篇幅。${previous?`这是返工：只把需要按评审意见修改的章节标 rewrite:true，其余章节保持标题不变并标 false。上一版大纲及各章开头：${JSON.stringify({outline:previous.outline,excerpts:previous.texts.map(t=>t.slice(0,300))})}`:''}\n${feedbackText}${facts}`)));
+  const outline=await cached(ctx.cfg,ctx.store,ctx.jobId,`${key}-outline.json`,Outline,label,async()=>parseJSON(await ctx.gateway.generate('writer',`${head}\n这份作品要求约 ${target} 字以上，分章写作。先只输出大纲 JSON：{"title":"作品标题","facts":["全文统一使用的关键参数和设定，每条写成“名称：取值”，如尺寸、材料、零件数、角度、时间、价格、样本量"],"sections":[{"heading":"## 章节标题","points":["本章要写清楚的要点"],"chars":本章目标字数,"rewrite":true}],"needs_input":[]}。sections 4-8 个，chars 之和不少于 ${target}，按评分要点分配篇幅。facts 是各章共用的唯一事实来源：各章写到这些量时必须用同一个值，所以要把核心机构、结构、材料、工艺、验证方案涉及的参数都列进去。返工时若评审指出参数前后不一致，在 facts 里定下统一的值。${previous?`这是返工：只把需要按评审意见修改的章节标 rewrite:true，其余章节保持标题不变并标 false。上一版大纲及各章开头：${JSON.stringify({outline:previous.outline,excerpts:previous.texts.map(t=>t.slice(0,300))})}`:''}\n${feedbackText}${facts}`)));
   const Text=z.object({text:z.string().min(1)});const texts:string[]=[];
   for(const [i,s] of outline.sections.entries()){
     const old=previous?previous.outline.sections.findIndex(p=>p.heading===s.heading):-1;const oldText=old>=0?previous!.texts[old]:undefined;
     if(!s.rewrite&&oldText){texts.push(oldText);continue;}
-    const r=await cached(ctx.cfg,ctx.store,ctx.jobId,`${key}-section-${i+1}.json`,Text,label,async()=>({text:(await ctx.gateway.generate('writer',`${head}\n分章写作：现在只写第 ${i+1}/${outline.sections.length} 章。直接输出这一章的 Markdown 正文，以「${s.heading}」开头；不要 JSON，不要写其他章。本章约 ${s.chars} 字，要有实质论证、机制细节和具体内容，不要写成要点罗列。缺真实资料的地方写【待补充：要什么】。证据中 kind 为 user 的条目是用户提供的真实资料，直接使用。\n全文大纲：${JSON.stringify(outline.sections.map(x=>({heading:x.heading,points:x.points})))}\n本章要点：${JSON.stringify(s.points)}\n${texts.length?`上一章结尾（保持衔接，不要重复）：${texts.at(-1)!.slice(-600)}\n`:''}${oldText?`本章上一版（在此基础上按评审意见改写）：${oldText}\n`:''}${feedbackText}${facts}`)).replace(/^```(?:markdown|md)?\s*/i,'').replace(/\s*```$/,'').trim()}));
+    const r=await cached(ctx.cfg,ctx.store,ctx.jobId,`${key}-section-${i+1}.json`,Text,label,async()=>({text:(await ctx.gateway.generate('writer',`${head}\n分章写作：现在只写第 ${i+1}/${outline.sections.length} 章。直接输出这一章的 Markdown 正文，以「${s.heading}」开头；不要 JSON，不要写其他章。参考文献只列资料中实际出现、可核对的文献或标准，不要凭记忆写期刊卷期页码；没有可核对的文献时少列或不列。本章约 ${s.chars} 字，要有实质论证、机制细节和具体内容，不要写成要点罗列。缺真实资料的地方写【待补充：要什么】。证据中 kind 为 user 的条目是用户提供的真实资料，直接使用。\n全文统一参数（必须严格使用这些值，不要另写不同的数值，也不要引入这里没有的新零件或新工艺）：${JSON.stringify(outline.facts)}\n全文大纲：${JSON.stringify(outline.sections.map(x=>({heading:x.heading,points:x.points})))}\n本章要点：${JSON.stringify(s.points)}\n${texts.length?`上一章结尾（保持衔接，不要重复）：${texts.at(-1)!.slice(-600)}\n`:''}${oldText?`本章上一版（在此基础上按评审意见改写）：${oldText}\n`:''}${feedbackText}${facts}`)).replace(/^```(?:markdown|md)?\s*/i,'').replace(/\s*```$/,'').trim()}));
     texts.push(/^#/.test(r.text)?r.text:`${s.heading.startsWith('#')?s.heading:`## ${s.heading}`}\n\n${r.text}`);
   }
   await atomicWriteJson(join(jobDir(ctx),`${key}-sections.json`),{outline,texts});
