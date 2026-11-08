@@ -262,14 +262,16 @@ ${feedback.length?`上一版未通过评审，必须逐条解决：\n${feedback.
   // 分章写作复用同一份写作约定（spec 之前的部分）和任务资料；每章只带精简后的证据，控制调用成本。
   const target=!slides&&task.kind!=='translation'?targetLength(task):0;
   const head=prompt.slice(0,prompt.indexOf(spec));
+  // 往届获奖作品作为写作参考，学习优秀作品的结构、深度和风格
+  const winners=ctx.evidence.filter(e=>e.kind==='search'||e.kind==='followup'||e.kind==='agent_research').filter(e=>/往届|获奖|作品|展示|优秀/.test(e.title)).slice(0,3).map(e=>({title:e.title,excerpt:e.text.slice(0,4000)}));
+  const winnerRef=winners.length?`\n往届获奖作品参考（学习其结构、深度和论述方式，但不要抄袭具体内容）：${JSON.stringify(winners)}`:'';
   const facts=`任务：${task.title}
 制作要求：${task.instructions}
 验收标准：${JSON.stringify(task.acceptance)}
 规则 ${JSON.stringify(ctx.brief)}
 本项交付物 ${JSON.stringify(item||null)}
 选题 ${JSON.stringify(ctx.idea)}
-证据 ${JSON.stringify(ctx.evidence.map(e=>({...e,text:e.text.slice(0,3000)})))}`;
-  const label=modelLabel(ctx.cfg,'writer');const want=slides?'slides':'text';
+证据 ${JSON.stringify(ctx.evidence.map(e=>({...e,text:e.text.slice(0,3000)})))}${winnerRef}`;  const label=modelLabel(ctx.cfg,'writer');const want=slides?'slides':'text';
   let work=await cached(ctx.cfg,ctx.store,ctx.jobId,`${taskKey(ctx,task)}-r${round+1}.json`,Work,label,async()=>target>=longDocumentChars?writeLong(ctx,task,round,feedback,head,facts,target):parseJSON(await ctx.gateway.generate('writer',prompt)));
   if(work.kind!==want)throw Error(`写作模型返回类型 ${work.kind} 与要求 ${want} 不符`);
   const layout=validateWork(work,slides?imagePaths(ctx):undefined);if(layout.length)work=await cached(ctx.cfg,ctx.store,ctx.jobId,`${taskKey(ctx,task)}-r${round+1}-repair.json`,Work,label,async()=>parseJSON(await ctx.gateway.generate('writer',`${prompt}\n自动检查未通过，请修复这些问题并仅输出完整作品 JSON：${JSON.stringify(layout)}\n需要修复的作品：${JSON.stringify(work)}`)));
