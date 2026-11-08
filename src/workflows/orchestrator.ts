@@ -219,14 +219,14 @@ async function fillTemplate(ctx:Ctx,task:PlanTask,templateRef:string,round:numbe
   return {paths:[out],reviewText:JSON.stringify(fields),notes:[`官方模板 ${task.title} 已按可识别字段填写，仍需检查版式和字段`]};
 }
 
-/** 制作要求和验收标准里的目标字数（取最大的下限），如“8000–12000字”“不少于1.5万字”。 */
+/** 制作要求和验收标准里的目标字数（取最大的下限），如”8000–12000字””不少于1.5万字”。没有明确要求时返回 10000 作为合理默认值。 */
 export function targetLength(task:{instructions:string;acceptance:string[]}):number{
   let best=0;for(const m of [task.instructions,...task.acceptance].join(' ').matchAll(/(\d+(?:\.\d+)?)\s*(万)?\s*(?:[-–—~～至到]\s*\d+(?:\.\d+)?\s*万?\s*)?字/g)){const n=Number(m[1])*(m[2]?10000:1);if(n>best)best=n;}
-  return best;
+  return best||10000;
 }
 /** 长文一次生成容易写短、各章深浅不一，超过这个字数就先列大纲再逐章写。 */
-export const longDocumentChars=6000;
-const Outline=z.object({title:z.string().min(1),facts:z.array(z.string()).default([]),sections:z.array(z.object({heading:z.string().min(1),points:z.array(z.string()).default([]),chars:z.number().int().min(200).max(6000).default(1500),rewrite:z.boolean().default(true)})).min(2).max(10),needs_input:z.array(z.string()).default([])});
+export const longDocumentChars=8000;
+const Outline=z.object({title:z.string().min(1),facts:z.array(z.string()).default([]),sections:z.array(z.object({heading:z.string().min(1),points:z.array(z.string()).default([]),chars:z.number().int().min(300).max(8000).default(2000),rewrite:z.boolean().default(true)})).min(2).max(10),needs_input:z.array(z.string()).default([])});
 const Sections=z.object({outline:Outline,texts:z.array(z.string())});
 /** 分章写作：大纲一次调用，每章一次调用；返工时只重写评审意见涉及的章节，其余沿用上一版。 */
 async function writeLong(ctx:Ctx,task:PlanTask,round:number,feedback:string[],head:string,facts:string,target:number):Promise<Work>{
