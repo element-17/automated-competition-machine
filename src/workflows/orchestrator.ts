@@ -263,7 +263,7 @@ ${feedback.length?`上一版未通过评审，必须逐条解决：\n${feedback.
   const target=!slides&&task.kind!=='translation'?targetLength(task):0;
   const head=prompt.slice(0,prompt.indexOf(spec));
   // 往届获奖作品作为写作参考，学习优秀作品的结构、深度和风格
-  const winners=ctx.evidence.filter(e=>e.kind==='search'||e.kind==='followup'||e.kind==='agent_research').filter(e=>/往届|获奖|作品|展示|优秀/.test(e.title)).slice(0,3).map(e=>({title:e.title,excerpt:e.text.slice(0,4000)}));
+  const winners=ctx.evidence.filter(e=>e.kind==='search'||e.kind==='followup'||e.kind==='agent_research').filter(e=>/往届|获奖|作品|展示|优秀/.test(e.title)).slice(0,8).map(e=>({title:e.title,excerpt:e.text.slice(0,5000)}));
   const winnerRef=winners.length?`\n往届获奖作品参考（学习其结构、深度和论述方式，但不要抄袭具体内容）：${JSON.stringify(winners)}`:'';
   const facts=`任务：${task.title}
 制作要求：${task.instructions}
