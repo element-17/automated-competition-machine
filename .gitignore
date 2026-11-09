@@ -6,3 +6,7 @@ data/
 .env.*
 config/config.json
 *.log
+
+# LangGraph API
+.langgraph_api
+.langgraphjs_api.checkpointer.json

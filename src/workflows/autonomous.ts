@@ -12,7 +12,8 @@ import { modelLabel } from '../agents/models.js';
 import { researchGraph } from './workflow.js';
 import { collectCandidateEvidence, compareCandidates, type CandidateEvidence, type Choice } from './concepts.js';
 import { saveJobProgress } from '../core/job-progress.js';
-import { Guard, Idea, contents, record, cached, runOrchestration, type DeliverableResult } from './orchestrator.js';
+import { Guard, Idea, contents, record, cached, type DeliverableResult } from './shared.js';
+import { runOrchestration } from './orchestrator.js';
 
 export { deliveryFormat, canDraftUnknownFormat } from './orchestrator.js';
 type Gate={decision:'proceed'|'exclude'|'needs_input';reason:string;evidence_url:string|null;evidence_quote:string|null};

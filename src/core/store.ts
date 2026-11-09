@@ -3,6 +3,28 @@ import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import type { Evidence, Job } from './types.js';
 
+/** 租约所有者带进程号：进程已退出时租约立即失效，不必等满 5 分钟。 */
+export const leaseOwner=()=>`${randomUUID()}:${process.pid}`;
+/** 所有者进程是否还活着；没有进程号的旧记录无法判断，按存活处理。 */
+function ownerAlive(owner:string){const pid=Number(owner.split(':').at(-1));if(!Number.isInteger(pid)||pid<=0)return true;try{process.kill(pid,0);return true;}catch(e){return (e as NodeJS.ErrnoException).code==='EPERM';}}
+
+/**
+ * 退出时释放租约：Ctrl+C、关窗口或被 kill 时，租约不清理会让下一次 work/resume 白等 5 分钟。
+ * 处理函数只做同步数据库删除，跑完立即按信号退出。
+ */
+const exitCleanups=new Set<()=>void>();
+let exitHandlersInstalled=false;
+export function trackLeaseOnExit(release:()=>void):()=>void {
+  if(!exitHandlersInstalled){
+    exitHandlersInstalled=true;
+    const run=()=>{for(const cleanup of [...exitCleanups]){try{cleanup();}catch{ /* 数据库可能已关闭。 */ }}exitCleanups.clear();};
+    process.once('exit',run);
+    for(const [signal,code] of [['SIGINT',130],['SIGTERM',143],['SIGHUP',129]] as const)process.once(signal,()=>{run();process.exit(code);});
+  }
+  exitCleanups.add(release);
+  return ()=>{exitCleanups.delete(release);release();};
+}
+
 export class Store {
   db: DatabaseSync;
   constructor(dir: string) {
@@ -63,7 +85,10 @@ export class Store {
     }catch(e){this.db.exec('ROLLBACK');throw e;}
   }
   acquireJobRun(id:string,owner:string,leaseMs:number){
-    this.db.exec('BEGIN IMMEDIATE');try{const now=new Date().toISOString();if(this.db.prepare('SELECT 1 FROM job_runs WHERE job_id=? AND expires_at>?').get(id,now))throw Error('该任务已有执行进程，请勿重复恢复');
+    this.db.exec('BEGIN IMMEDIATE');try{const now=new Date().toISOString();
+      // 上一次执行被强制终止时进程已不存在，租约虽未到期也不能继续拦住恢复。
+      const current=this.db.prepare('SELECT owner,expires_at FROM job_runs WHERE job_id=?').get(id) as {owner:string;expires_at:string}|undefined;
+      if(current&&current.expires_at>now&&ownerAlive(current.owner))throw Error('该任务已有执行进程，请勿重复恢复');
       const job=this.job(id);if(['completed','paused','stopped'].includes(job.state)||this.jobControl(id))throw Error('任务当前不可执行，请先检查状态');
       this.db.prepare('INSERT OR REPLACE INTO job_runs VALUES(?,?,?)').run(id,owner,new Date(Date.now()+leaseMs).toISOString());this.db.exec('COMMIT');
     }catch(e){this.db.exec('ROLLBACK');throw e;}
@@ -102,7 +127,10 @@ export class Store {
   updateQueue(id:string,title:string,url:string){if(!title.trim())throw Error('赛事名称不能为空');let parsed:URL;try{parsed=new URL(url);}catch{throw Error('公告地址无效');}if(!['http:','https:'].includes(parsed.protocol))throw Error('公告地址必须是 HTTP 或 HTTPS');parsed.hash='';this.db.exec('BEGIN IMMEDIATE');try{const item=this.db.prepare('SELECT q.state,q.job_id,c.url,c.brief,EXISTS(SELECT 1 FROM jobs j WHERE j.competition_id=c.id) AS has_jobs,EXISTS(SELECT 1 FROM evidence e WHERE e.competition_id=c.id) AS has_evidence FROM competition_queue q JOIN competitions c ON c.id=q.competition_id WHERE q.competition_id=?').get(id) as {state:string;job_id:string|null;url:string;brief:string|null;has_jobs:number;has_evidence:number}|undefined;if(!item)throw Error('赛事不在队列中');if(item.state==='processing')throw Error('赛事正在处理中，不能修改');if((item.job_id||item.has_jobs||item.has_evidence||item.brief)&&item.url!==parsed.toString())throw Error('已有任务或来源的赛事不能更改公告地址，请新增一条赛事');this.db.prepare('UPDATE competitions SET title=?,url=? WHERE id=?').run(title.trim(),parsed.toString(),id);this.db.prepare('DELETE FROM queue_reviews WHERE competition_id=?').run(id);this.db.prepare('UPDATE competition_queue SET updated_at=? WHERE competition_id=?').run(new Date().toISOString(),id);this.db.exec('COMMIT');}catch(e){this.db.exec('ROLLBACK');if(String(e).includes('UNIQUE constraint'))throw Error('该公告地址已存在');throw e;}}
   deleteQueue(id:string){this.db.exec('BEGIN IMMEDIATE');try{const row=this.db.prepare('SELECT state FROM competition_queue WHERE competition_id=?').get(id) as {state:string}|undefined;if(!row)throw Error('赛事不在队列中');if(row.state==='processing')throw Error('赛事正在处理中，不能删除');this.db.prepare('DELETE FROM queue_reviews WHERE competition_id=?').run(id);this.db.prepare('DELETE FROM competition_queue WHERE competition_id=?').run(id);this.db.exec('COMMIT');}catch(e){this.db.exec('ROLLBACK');throw e;}}
   retryQueue(id?:string) {const now=new Date().toISOString();return id?this.db.prepare("UPDATE competition_queue SET state='queued',updated_at=?,error=NULL WHERE state='failed' AND NOT EXISTS (SELECT 1 FROM job_controls WHERE job_id=competition_queue.job_id) AND competition_id=?").run(now,id).changes:this.db.prepare("UPDATE competition_queue SET state='queued',updated_at=?,error=NULL WHERE state='failed' AND NOT EXISTS (SELECT 1 FROM job_controls WHERE job_id=competition_queue.job_id)").run(now).changes;}
-  acquireWorker(owner:string,leaseMs:number) {const now=new Date().toISOString(),expires=new Date(Date.now()+leaseMs).toISOString();this.db.exec('BEGIN IMMEDIATE');try{const lock=this.db.prepare('SELECT owner,expires_at FROM queue_worker WHERE id=1').get() as {owner:string;expires_at:string}|undefined;if(lock&&lock.expires_at>now)throw Error('已有队列处理进程正在运行');this.db.prepare('INSERT OR REPLACE INTO queue_worker VALUES(1,?,?)').run(owner,expires);this.db.prepare("UPDATE competition_queue SET state=CASE (SELECT action FROM job_controls WHERE job_id=competition_queue.job_id) WHEN 'pause' THEN 'paused' WHEN 'stop' THEN 'stopped' ELSE 'queued' END,updated_at=?,error='上次处理进程中断，等待从检查点恢复' WHERE state='processing'").run(now);this.db.exec('COMMIT');}catch(e){this.db.exec('ROLLBACK');throw e;}}
+  acquireWorker(owner:string,leaseMs:number) {const now=new Date().toISOString(),expires=new Date(Date.now()+leaseMs).toISOString();this.db.exec('BEGIN IMMEDIATE');try{const lock=this.db.prepare('SELECT owner,expires_at FROM queue_worker WHERE id=1').get() as {owner:string;expires_at:string}|undefined;
+    // 上次处理进程被强制终止时，租约还没到期也应允许立刻接管，否则只能干等 5 分钟。
+    if(lock&&lock.expires_at>now&&ownerAlive(lock.owner))throw Error('已有队列处理进程正在运行');
+    this.db.prepare('INSERT OR REPLACE INTO queue_worker VALUES(1,?,?)').run(owner,expires);this.db.prepare("UPDATE competition_queue SET state=CASE (SELECT action FROM job_controls WHERE job_id=competition_queue.job_id) WHEN 'pause' THEN 'paused' WHEN 'stop' THEN 'stopped' ELSE 'queued' END,updated_at=?,error='上次处理进程中断，等待从检查点恢复' WHERE state='processing'").run(now);this.db.exec('COMMIT');}catch(e){this.db.exec('ROLLBACK');throw e;}}
   heartbeatWorker(owner:string,leaseMs:number):boolean {return !!this.db.prepare('UPDATE queue_worker SET expires_at=? WHERE id=1 AND owner=? AND expires_at>?').run(new Date(Date.now()+leaseMs).toISOString(),owner,new Date().toISOString()).changes;}
   releaseWorker(owner:string){this.db.prepare('DELETE FROM queue_worker WHERE id=1 AND owner=?').run(owner);}
   claimQueue(owner:string,budget:number):{competitionId:string;jobId:string;resume:boolean}|null {

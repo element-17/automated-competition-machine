@@ -73,9 +73,14 @@ export async function installRuntime(name:RuntimeName,onOutput?:(line:string)=>v
  const dir=runtimeDir(name),r=runtimes[name];if(options.sdkOnly&&(name==='opencode'||!systemRuntime(name)))throw Error(`${r.label} 没有可用的本机版本，需下载完整版`);
  mkdirSync(dir,{recursive:true});if(!existsSync(join(dir,'package.json')))writeFileSync(join(dir,'package.json'),JSON.stringify({name:`compete-runtime-${name}`,private:true})+'\n');
  const args=['install','--no-audit','--no-fund','--save-exact',...(options.sdkOnly?['--omit=optional']:[]),`${r.pkg}@${r.version}`];const tail:string[]=[];
- await new Promise<void>((done,fail)=>{const child=spawn(process.platform==='win32'?'npm.cmd':'npm',args,{cwd:dir,shell:process.platform==='win32',windowsHide:true,env:process.env});
+ // npm 遇到网络异常、代理或 registry 卡住时会长时间不输出；没有超时会让人以为程序死了。
+ const timeoutMs=Number(process.env.COMPETE_INSTALL_TIMEOUT_MS||900_000);
+ await new Promise<void>((done,fail)=>{
+  const child=spawn(process.platform==='win32'?'npm.cmd':'npm',args,{cwd:dir,shell:process.platform==='win32',windowsHide:true,env:process.env});
   const read=(chunk:Buffer)=>{for(const line of chunk.toString().split(/\r?\n/).filter(Boolean)){tail.push(line);if(tail.length>20)tail.shift();onOutput?.(line);}};child.stdout.on('data',read);child.stderr.on('data',read);
-  child.once('error',fail);child.once('close',code=>code===0?done():fail(Error(`${r.label} 下载失败（npm 退出码 ${code}）：\n${tail.join('\n')}`)));});
+  const timer=setTimeout(()=>{child.kill();fail(Error(`${r.label} 下载超过 ${Math.round(timeoutMs/60000)} 分钟，已中止；可设置 COMPETE_INSTALL_TIMEOUT_MS 延长，或先检查 npm 代理与网络`));},timeoutMs);timer.unref();
+  const finish=(run:()=>void)=>{clearTimeout(timer);run();};
+  child.once('error',e=>finish(()=>fail(e)));child.once('close',code=>finish(()=>code===0?done():fail(Error(`${r.label} 下载失败（npm 退出码 ${code}）：\n${tail.join('\n')}`))));});
  if(!isInstalled(name))throw Error(`${r.label} 安装后仍找不到 ${r.pkg}`);
 }
 export function removeRuntime(name:RuntimeName){rmSync(runtimeDir(name),{recursive:true,force:true});}

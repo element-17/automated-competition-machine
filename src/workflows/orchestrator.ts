@@ -29,7 +29,6 @@ import { createSupportingArtifact } from '../artifacts/supporting.js';
 import { discoverFormats } from './formats.js';
 import { atomicWriteJson, checkTaskReceipt, createTaskReceipt, taskInputHash, type TaskReceipt } from './task-receipts.js';
 import { checkDelivery, checkLimits, fixedFileName, measureArtifact, parseBounds, type RequirementCheck } from '../artifacts/delivery-checks.js';
-export { Guard, Idea, contents, record, cached, type DeliverableResult, type DeliverableStatus };
 const Original=z.object({url:z.string().nullable(),text:z.string().nullable(),reason:z.string()});
 
 const message=(e:unknown)=>e instanceof Error?e.message:String(e);
@@ -340,11 +339,11 @@ async function verify(ctx:Ctx,task:PlanTask,attempt:Attempt):Promise<Verdict|nul
     if(task.kind==='image'&&ctx.gateway.inspectImage&&attempt.paths[0]){
       // 看图评审：画面质量问题（主体错误、拼成多格、文字遮挡或乱码、水印、虚构品牌、明显不专业）是阻塞问题。
       const sharp=(await import('sharp')).default;const data=await sharp(attempt.paths[0]).resize({width:1536,height:1536,fit:'inside',withoutEnlargement:true}).jpeg({quality:85}).toBuffer();
-      try{const v=await parse(ctx.gateway.inspectImage(`${Guard}\n你是独立作品验收评审，现在看到的是实际生成的图片。像评委一样严格检查画面质量：主体是否符合任务、构图是否完整专业、是否被拼成了多格画面、文字是否遮挡关键内容或出现乱码、有无水印或虚构品牌标识。画面层面的这些问题是阻塞问题。\n${rubric}\n画面设计说明：${reviewText}`,{data,mime:'image/jpeg'},'reviewer'));return {...v,visual:true};}
+      try{const v=await parse(ctx.gateway.inspectImage(`${Guard}\n任务：作品验收。现在看到的是实际生成的图片。像评委一样严格检查画面质量：主体是否符合任务、构图是否完整专业、是否被拼成了多格画面、文字是否遮挡关键内容或出现乱码、有无水印或虚构品牌标识。画面层面的这些问题是阻塞问题。\n${rubric}\n画面设计说明：${reviewText}`,{data,mime:'image/jpeg'},'reviewer'));return {...v,visual:true};}
       catch(e){if(isJobControlError(e)||budgetError(e))throw e;/* 评审模型不支持看图时退回到读设计说明。 */}
     }
     const imageNote=task.kind==='image'?'\n注意：你只能看到画面设计说明，看不到图片。只评审说明是否落实了要求；只能从画面判断的标准不要列为问题。':'';
-    const textPrompt=`${Guard}\n你是独立作品验收评审。只依据下面的实际产物内容，按评委的眼光严格检查作品质量。${imageNote}\n${rubric}\n产物内容：\n${reviewText.slice(0,40000)}`;
+    const textPrompt=`${Guard}\n任务：作品验收。只依据下面的实际产物内容，按评委的眼光严格检查作品质量。${imageNote}\n${rubric}\n产物内容：\n${reviewText.slice(0,40000)}`;
     // 评审输出偶尔被截断或不是 JSON；重试一次，仍失败才记为未评审。
     for(let attempt=0;;attempt++){try{return {...await parse(ctx.gateway.generate('reviewer',attempt?`${textPrompt}\n\n上一次输出不是有效 JSON。只输出 JSON，issues、suggestions、needs_input 各不超过 5 条，每条不超过 120 字。`:textPrompt,'reviewer')),visual:false};}catch(e){if(attempt>=1||!/JSON|Zod|invalid|Expected/i.test(errorHead(e)))throw e;}}
   }catch(e){const m=message(e);if(isJobControlError(e)||budgetError(m))throw e;return null;}

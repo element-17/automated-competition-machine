@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, writeFile, rm, readFile } from 'node:fs/promises';
+import { spawn } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Store } from '../dist/core/store.js';
@@ -55,4 +56,22 @@ test('尚未开始的任务暂停后仍能从初始输入开始，过期租约�
   const next=beginJobRun(store,job);try{assert.throws(()=>release.assert(),/租约已失效/);release();assert.doesNotThrow(()=>next.assert());}finally{next();}
   let calls=0;const result=await runJob({dataDir:dir},store,{search:async()=>[],generate:async()=>{calls++;return '你好';}},job,false);assert.equal(calls,1);assert.equal(await readFile(result.outputPath,'utf8'),'你好');
  }finally{store.close();await rm(dir,{recursive:true,force:true});}
+});
+
+test('执行进程被强制终止后，任务租约按进程号立即释放，可以马上恢复',async()=>{
+ const dir=await mkdtemp(join(tmpdir(),'job-crash-'));
+ try{
+  const store=new Store(dir);
+  const id=store.addCompetition('https://example.org/crash','赛事'),job=store.createJob(id,'automatic',{},20);store.close();
+  // 独立进程持租约后被强杀：留下的租约行没有对应活进程。
+  const child=spawn(process.execPath,['-e',`import(${JSON.stringify(new URL('../dist/core/job-control.js',import.meta.url).href)}).then(async({beginJobRun})=>{const {Store}=await import(${JSON.stringify(new URL('../dist/core/store.js',import.meta.url).href)});const s=new Store(${JSON.stringify(dir)});beginJobRun(s,${JSON.stringify(job)});console.log('leased');setInterval(()=>{},1000);});`],{stdio:['ignore','pipe','pipe']});
+  await new Promise((resolve,reject)=>{child.stdout.on('data',d=>{if(String(d).includes('leased'))resolve();});child.once('error',reject);});
+  child.kill('SIGKILL');await new Promise(resolve=>child.once('exit',resolve));
+  const next=new Store(dir);
+  try{
+   const started=Date.now();const release=beginJobRun(next,job);
+   assert.ok(Date.now()-started<10_000,'不能等 5 分钟租约过期');
+   release();assert.equal(next.job(job).state,'pending');
+  }finally{next.close();}
+ }finally{await rm(dir,{recursive:true,force:true});}
 });

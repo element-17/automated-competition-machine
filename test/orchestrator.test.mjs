@@ -28,12 +28,12 @@ test('规划 Agent 把压缩包交付物拆成软件和文档并打包；评审�
       buildProject:async(ws,prompt)=>{built++;assert.match(prompt,/离线识别页面/);await writeFile(join(ws,'index.html'),'<html><body><h1>识物助盲</h1><script src="app.js"></script></body></html>');await writeFile(join(ws,'app.js'),'console.log(1)');await writeFile(join(ws,'README.md'),'# 识物助盲');},
       generate:async(role,prompt,agent=role)=>{calls.push({role,agent,prompt});
         if(prompt.includes('拆解成可以实际制作的文件任务'))return JSON.stringify(bundlePlan);
-        if(prompt.includes('独立作品验收评审')){if(prompt.includes('任务：作品说明书')){docReviews++;return JSON.stringify(docReviews===1?{pass:false,issues:['缺少设计思路章节']}:{pass:true,issues:[]});}return JSON.stringify({pass:true,issues:[]});}
+        if(prompt.includes('任务：作品验收')){if(prompt.includes('任务：作品说明书')){docReviews++;return JSON.stringify(docReviews===1?{pass:false,issues:['缺少设计思路章节']}:{pass:true,issues:[]});}return JSON.stringify({pass:true,issues:[]});}
         if(prompt.includes('请针对这项比赛的指定交付物直接创作')){const fixed=prompt.includes('缺少设计思路章节');return JSON.stringify({kind:'text',title:prompt.includes('任务：作品原创承诺书')?'作品原创承诺书':'作品说明书',text:fixed?'## 设计思路\n离线识别。':'## 简介\n作品简介。',sources:[]});}
         throw Error('unexpected '+prompt.slice(0,60));}};
     const result=await runOrchestration(ctx.cfg,ctx.store,g,{jobId:ctx.job,competitionId:ctx.id,idea});
     assert.ok(calls.some(c=>c.agent==='planner'),'规划由 planner Agent 完成');
-    assert.ok(calls.filter(c=>c.prompt.includes('独立作品验收评审')).every(c=>c.agent==='reviewer'));
+    assert.ok(calls.filter(c=>c.prompt.includes('任务：作品验收')).every(c=>c.agent==='reviewer'));
     assert.equal(built,1);assert.equal(docReviews,2);
     const doc=result.deliverables.find(d=>d.id==='doc');assert.equal(doc.status,'submission');assert.equal(doc.rounds,2);
     const zipPath=result.outputs.find(x=>x.endsWith('.zip'));assert.match(zipPath,/软件赛道_识物助盲_作者\.zip$/);
@@ -49,7 +49,7 @@ test('规划 Agent 把压缩包交付物拆成软件和文档并打包；评审�
 test('计划引用错误格式时带问题重试一次，仍无效则用确定性计划',async()=>{
   const ctx=await setup(brief([item('方案报告',['docx'])]));
   try{const prompts=[];const bad={tasks:[{id:'a',deliverable:0,title:'报告',kind:'slides',format:'docx',instructions:'x',acceptance:['y']}]};
-    const g={search:async()=>[],generate:async(role,prompt)=>{if(prompt.includes('拆解成可以实际制作的文件任务')){prompts.push(prompt);return JSON.stringify(bad);}if(prompt.includes('独立作品验收评审'))return JSON.stringify({pass:true,issues:[]});if(prompt.includes('直接创作'))return JSON.stringify({kind:'text',title:'报告',text:'正文',sources:[]});throw Error('unexpected');}};
+    const g={search:async()=>[],generate:async(role,prompt)=>{if(prompt.includes('拆解成可以实际制作的文件任务')){prompts.push(prompt);return JSON.stringify(bad);}if(prompt.includes('任务：作品验收'))return JSON.stringify({pass:true,issues:[]});if(prompt.includes('直接创作'))return JSON.stringify({kind:'text',title:'报告',text:'正文',sources:[]});throw Error('unexpected');}};
     const result=await runOrchestration(ctx.cfg,ctx.store,g,{jobId:ctx.job,competitionId:ctx.id,idea});
     assert.equal(prompts.length,2);assert.match(prompts[1],/slides 只能制作 pptx/);
     assert.ok(result.outputs.some(x=>x.endsWith('.docx')));assert.match(result.gaps.join(' '),/已按格式规则生成计划/);
@@ -58,7 +58,7 @@ test('计划引用错误格式时带问题重试一次，仍无效则用确定�
 
 test('两轮仍未通过验收的作品保留为草稿，不标记为投稿件',async()=>{
   const ctx=await setup(brief([item('方案报告',['docx'])]));
-  try{let writes=0;const g={search:async()=>[],generate:async(role,prompt)=>{if(prompt.includes('拆解成可以实际制作的文件任务'))throw Error('规划不可用');if(prompt.includes('独立作品验收评审'))return JSON.stringify({pass:false,issues:['只有提纲']});if(prompt.includes('直接创作')){writes++;return JSON.stringify({kind:'text',title:'报告',text:'提纲',sources:[]});}throw Error('unexpected');}};
+  try{let writes=0;const g={search:async()=>[],generate:async(role,prompt)=>{if(prompt.includes('拆解成可以实际制作的文件任务'))throw Error('规划不可用');if(prompt.includes('任务：作品验收'))return JSON.stringify({pass:false,issues:['只有提纲']});if(prompt.includes('直接创作')){writes++;return JSON.stringify({kind:'text',title:'报告',text:'提纲',sources:[]});}throw Error('unexpected');}};
     const result=await runOrchestration(ctx.cfg,ctx.store,g,{jobId:ctx.job,competitionId:ctx.id,idea});
     assert.equal(writes,2);const d=result.deliverables[0];assert.equal(d.status,'draft');assert.match(result.gaps.join(' '),/2 轮仍未通过验收：只有提纲/);
     assert.ok(!ctx.store.artifacts(ctx.job).some(a=>a.kind==='submission'));
@@ -86,7 +86,7 @@ function documentGateway(plan,{review={pass:true,issues:[]},reviewError=false}={
   const calls={plans:0,writes:0,reviews:0};
   return {calls,search:async()=>[],generate:async(role,prompt)=>{
     if(prompt.includes('拆解成可以实际制作的文件任务')){calls.plans++;return JSON.stringify(plan);}
-    if(prompt.includes('独立作品验收评审')){calls.reviews++;if(reviewError)throw Error('评审服务离线');return JSON.stringify(review);}
+    if(prompt.includes('任务：作品验收')){calls.reviews++;if(reviewError)throw Error('评审服务离线');return JSON.stringify(review);}
     if(prompt.includes('直接创作')){calls.writes++;return JSON.stringify({kind:'text',title:'报告',text:prompt.includes('更新后的规则')?'依照新规则生成的正文':'经过实际生成的正文',sources:[]});}
     throw Error('unexpected prompt');
   }};
@@ -155,7 +155,7 @@ test('任务中途预算耗尽后恢复，只继续未完成的交付物',async(
   try{
     const g=documentGateway({tasks:[documentTask(),documentTask({id:'second',title:'说明',deliverable:1})]});
     const generate=g.generate;let fail=true;
-    g.generate=async(role,prompt)=>{if(fail&&prompt.includes('独立作品验收评审')&&prompt.includes('任务：说明'))throw Error('模型调用预算耗尽');return generate(role,prompt);};
+    g.generate=async(role,prompt)=>{if(fail&&prompt.includes('任务：作品验收')&&prompt.includes('任务：说明'))throw Error('模型调用预算耗尽');return generate(role,prompt);};
     const input={jobId:ctx.job,competitionId:ctx.id,idea};
     await assert.rejects(runOrchestration(ctx.cfg,ctx.store,g,input),/预算/);const counts={...g.calls};fail=false;
     const result=await runOrchestration(ctx.cfg,ctx.store,g,input);
@@ -171,7 +171,7 @@ test('图片的设计说明通过评审，也不能替代实际画面验收',asy
   try{
     const g={search:async()=>[],generateImage:async()=>({data:await sharp({create:{width:800,height:600,channels:3,background:'#336699'}}).png().toBuffer(),mime:'image/png'}),generate:async(role,prompt)=>{
       if(prompt.includes('拆解成可以实际制作的文件任务'))return JSON.stringify({tasks:[documentTask({kind:'image',format:'png'})]});
-      if(prompt.includes('独立作品验收评审'))return JSON.stringify({pass:true,issues:[]});
+      if(prompt.includes('任务：作品验收'))return JSON.stringify({pass:true,issues:[]});
       if(prompt.includes('设计一张独特的图片作品'))return JSON.stringify({image_prompt:'校园设计',caption:''});
       throw Error('unexpected');
     }};
@@ -191,7 +191,7 @@ test('返工生成另一轮产物，失败时保留上一轮草稿文件',async(
       await writeFile(join(ws,'app.js'),builds===1?'console.log(1)':'function {');
     },generate:async(role,prompt)=>{
       if(prompt.includes('拆解成可以实际制作的文件任务'))return JSON.stringify({tasks:[documentTask({kind:'software',format:'zip'})]});
-      if(prompt.includes('独立作品验收评审'))return JSON.stringify({pass:false,issues:['需完善功能']});
+      if(prompt.includes('任务：作品验收'))return JSON.stringify({pass:false,issues:['需完善功能']});
       throw Error('unexpected');
     }};
     const result=await runOrchestration(ctx.cfg,ctx.store,g,{jobId:ctx.job,competitionId:ctx.id,idea});
@@ -207,7 +207,7 @@ test('实际文件违反明确数值限制时先返工，模型说通过也不�
     let writes=0,reviews=0;const g={search:async()=>[],generate:async(role,prompt)=>{
       if(prompt.includes('拆解成可以实际制作的文件任务'))return JSON.stringify({tasks:[documentTask()]});
       if(prompt.includes('直接创作')){writes++;if(writes===2)assert.match(prompt,/实测.*字符/);return JSON.stringify({kind:'text',title:'报告',text:writes===1?'太短':'这份完整作品描述了具体对象与问题，并说明了方案机制及后续验证计划。',sources:[]});}
-      if(prompt.includes('独立作品验收评审')){reviews++;return JSON.stringify({pass:true,issues:[]});}
+      if(prompt.includes('任务：作品验收')){reviews++;return JSON.stringify({pass:true,issues:[]});}
       throw Error('unexpected');
     }};
     const result=await runOrchestration(ctx.cfg,ctx.store,g,{jobId:ctx.job,competitionId:ctx.id,idea});
@@ -249,7 +249,7 @@ test('多轮任务在第三轮评审中断，恢复时不重复已完成的写�
     let writes=0,reviews=0,interrupt=true;const g={search:async()=>[],generate:async(role,prompt)=>{
       if(prompt.includes('拆解成可以实际制作的文件任务'))return JSON.stringify({tasks:[documentTask()]});
       if(prompt.includes('直接创作')){writes++;if(writes>1){assert.match(prompt,/上一版作品：\{/);assert.match(prompt,new RegExp(`第${writes-1}版正文`));}return JSON.stringify({kind:'text',title:'报告',text:`第${writes}版正文`,sources:[]});}
-      if(prompt.includes('独立作品验收评审')){if(interrupt&&writes===3)throw Error('预算耗尽');reviews++;return JSON.stringify(reviews<3?{pass:false,issues:['请补充论证']}: {pass:true,issues:[]});}
+      if(prompt.includes('任务：作品验收')){if(interrupt&&writes===3)throw Error('预算耗尽');reviews++;return JSON.stringify(reviews<3?{pass:false,issues:['请补充论证']}: {pass:true,issues:[]});}
       throw Error('unexpected');
     }};const input={jobId:ctx.job,competitionId:ctx.id,idea};
     await assert.rejects(runOrchestration(ctx.cfg,ctx.store,g,input),/预算/);assert.equal(writes,3);assert.equal(reviews,2);interrupt=false;
@@ -261,7 +261,7 @@ test('增加制作轮数后继续原来的失败草稿，复用此前完整轮�
   const ctx=await setup(brief([item('报告',['txt'])]));
   try{
     let writes=0,reviews=0;const g=documentGateway({tasks:[documentTask()]});const original=g.generate;
-    g.generate=async(role,prompt)=>{if(prompt.includes('直接创作'))writes++;if(prompt.includes('独立作品验收评审')){reviews++;return JSON.stringify({pass:reviews===3,issues:reviews===3?[]:['需补充具体内容']});}return original(role,prompt);};
+    g.generate=async(role,prompt)=>{if(prompt.includes('直接创作'))writes++;if(prompt.includes('任务：作品验收')){reviews++;return JSON.stringify({pass:reviews===3,issues:reviews===3?[]:['需补充具体内容']});}return original(role,prompt);};
     const input={jobId:ctx.job,competitionId:ctx.id,idea};const first=await runOrchestration(ctx.cfg,ctx.store,g,input);assert.equal(first.deliverables[0].status,'draft');assert.equal(writes,2);
     ctx.cfg.execution.productionRounds=4;const next=await runOrchestration(ctx.cfg,ctx.store,g,input);assert.equal(next.deliverables[0].status,'submission');assert.equal(writes,3);assert.equal(reviews,3);
   }finally{await ctx.done();}
@@ -276,7 +276,7 @@ test('软件返工承接上一轮可用文件，同时保留上一轮原件',asy
       else{assert.equal(await readFile(join(ws,'state.js'),'utf8'),'const preserved = 1;');await writeFile(join(ws,'index.html'),'<html>修订界面<script src="state.js"></script></html>');}
     },generate:async(role,prompt)=>{
       if(prompt.includes('拆解成可以实际制作的文件任务'))return JSON.stringify({tasks:[documentTask({kind:'software',format:'zip'})]});
-      if(prompt.includes('独立作品验收评审')){reviews++;return JSON.stringify({pass:reviews===2,issues:reviews===2?[]:['补充界面']});}throw Error('unexpected');
+      if(prompt.includes('任务：作品验收')){reviews++;return JSON.stringify({pass:reviews===2,issues:reviews===2?[]:['补充界面']});}throw Error('unexpected');
     }};
     await runOrchestration(ctx.cfg,ctx.store,g,{jobId:ctx.job,competitionId:ctx.id,idea});assert.equal(builds,2);assert.doesNotMatch(await readFile(join(folders[0],'index.html'),'utf8'),/修订界面/);
   }finally{await ctx.done();}
@@ -309,7 +309,7 @@ test('评审只按阻塞问题判定：细节建议不阻止通过，待补资�
   try{let writes=0,reviewPrompt='',writePrompt='';
     const g={search:async()=>[],generate:async(role,prompt)=>{
       if(prompt.includes('拆解成可以实际制作的文件任务'))throw Error('规划不可用');
-      if(prompt.includes('独立作品验收评审')){reviewPrompt=prompt;return JSON.stringify({issues:[],suggestions:['第3节标题层级可统一'],needs_input:['团队实测的开启力数据']});}
+      if(prompt.includes('任务：作品验收')){reviewPrompt=prompt;return JSON.stringify({issues:[],suggestions:['第3节标题层级可统一'],needs_input:['团队实测的开启力数据']});}
       if(prompt.includes('直接创作')){writes++;writePrompt=prompt;return JSON.stringify({kind:'text',title:'报告',text:'## 背景\n用户调研显示【待补充：用户访谈记录】。',sources:[],needs_input:['10 名目标用户的访谈记录']});}
       throw Error('unexpected');}};
     const result=await runOrchestration(ctx.cfg,ctx.store,g,{jobId:ctx.job,competitionId:ctx.id,idea});
@@ -324,7 +324,7 @@ test('评审只按阻塞问题判定：细节建议不阻止通过，待补资�
 
 test('评审给出阻塞问题时，即使模型写 pass:true 也判不通过',async()=>{
   const ctx=await setup(brief([item('方案报告',['docx'])]));
-  try{let writes=0;const g={search:async()=>[],generate:async(role,prompt)=>{if(prompt.includes('拆解成可以实际制作的文件任务'))throw Error('规划不可用');if(prompt.includes('独立作品验收评审'))return JSON.stringify(writes===1?{pass:true,issues:['核心机制只有一句话，没有原理说明']}:{issues:[]});if(prompt.includes('直接创作')){writes++;return JSON.stringify({kind:'text',title:'报告',text:'正文',sources:[]});}throw Error('unexpected');}};
+  try{let writes=0;const g={search:async()=>[],generate:async(role,prompt)=>{if(prompt.includes('拆解成可以实际制作的文件任务'))throw Error('规划不可用');if(prompt.includes('任务：作品验收'))return JSON.stringify(writes===1?{pass:true,issues:['核心机制只有一句话，没有原理说明']}:{issues:[]});if(prompt.includes('直接创作')){writes++;return JSON.stringify({kind:'text',title:'报告',text:'正文',sources:[]});}throw Error('unexpected');}};
     const result=await runOrchestration(ctx.cfg,ctx.store,g,{jobId:ctx.job,competitionId:ctx.id,idea});
     assert.equal(writes,2);assert.equal(result.deliverables[0].rounds,2);
   }finally{await ctx.done();}
@@ -342,7 +342,7 @@ test('评审看实际图片：通过即完成视觉验收；PPT 嵌入先生成�
           {id:'render',deliverable:0,title:'效果图',kind:'image',format:'png',instructions:'产品主视图',acceptance:['主体清晰']}],
           packages:[{name:'作品.zip',deliverable:0,includes:['deck','render']}]});
         if(prompt.includes('设计一张独特的图片作品'))return JSON.stringify({image_prompt:'产品',caption:'效果图'});
-        if(prompt.includes('独立作品验收评审'))return JSON.stringify({issues:[]});
+        if(prompt.includes('任务：作品验收'))return JSON.stringify({issues:[]});
         if(prompt.includes('直接创作')){slidePrompt=prompt;return JSON.stringify({kind:'slides',title:'展示',sources:[],slides:[{background:'FFFFFF',elements:[{type:'text',text:'作品外观',x:0.5,y:0.3,w:6,h:0.8,fontSize:28},{type:'image',ref:'render',x:0.5,y:1.3,w:8,h:5.5}]}]});}
         throw Error('unexpected '+prompt.slice(0,40));}};
     const result=await runOrchestration(ctx.cfg,ctx.store,g,{jobId:ctx.job,competitionId:ctx.id,idea});
@@ -377,7 +377,7 @@ test('长文档先列大纲再逐章写，返工时只重写评审指出的章�
       if(prompt.includes('拆解成可以实际制作的文件任务'))return JSON.stringify({tasks:[documentTask({format:'docx',instructions:'写一份 8000-12000字的设计说明书',acceptance:['内容完整']})]});
       if(prompt.includes('先只输出大纲')){calls.outline++;const revise=prompt.includes('这是返工');return JSON.stringify({title:'设计说明书',sections:[{heading:'## 背景',points:['问题'],chars:3000,rewrite:!revise},{heading:'## 机制',points:['原理'],chars:5000,rewrite:true}],needs_input:[]});}
       if(prompt.includes('分章写作：现在只写')){const n=prompt.match(/第 (\d+)\/2 章/)[1];calls.section.push(n);return n==='1'?'## 背景\n背景正文。':`## 机制\n${prompt.includes('机制只有一句话')?'机制原理的详细说明，用户访谈【待补充：5 名用户的访谈记录】。':'机制一句话。'}`;}
-      if(prompt.includes('独立作品验收评审')){reviews++;return JSON.stringify(reviews===1?{issues:['机制只有一句话，需展开原理']}:{issues:[]});}
+      if(prompt.includes('任务：作品验收')){reviews++;return JSON.stringify(reviews===1?{issues:['机制只有一句话，需展开原理']}:{issues:[]});}
       throw Error('unexpected '+prompt.slice(0,40));}};
     const result=await runOrchestration(ctx.cfg,ctx.store,g,{jobId:ctx.job,competitionId:ctx.id,idea});
     assert.equal(calls.outline,2);assert.deepEqual(calls.section,['1','2','2'],'返工只重写第 2 章');
@@ -404,7 +404,7 @@ test('compete materials 导入用户资料，写作提示词把它当作可用�
     store=new Store(dir);
     try{const e=store.evidence(id).find(x=>x.kind==='user');assert.ok(e);assert.match(e.text,/每天服药 5 次/);
       let prompt='';const cfg={dataDir:dir,execution:{productionRounds:2,plannerRounds:2},writer:{providerID:'google',id:'gemini-test'},reviewer:{providerID:'anthropic',id:'claude-test'},maxCalls:40,sources:[],profile:{}};
-      const g={search:async()=>[],generate:async(role,p)=>{if(p.includes('拆解成可以实际制作的文件任务'))throw Error('规划不可用');if(p.includes('独立作品验收评审'))return JSON.stringify({issues:[]});if(p.includes('直接创作')){prompt=p;return JSON.stringify({kind:'text',title:'报告',text:'正文',sources:[]});}throw Error('unexpected');}};
+      const g={search:async()=>[],generate:async(role,p)=>{if(p.includes('拆解成可以实际制作的文件任务'))throw Error('规划不可用');if(p.includes('任务：作品验收'))return JSON.stringify({issues:[]});if(p.includes('直接创作')){prompt=p;return JSON.stringify({kind:'text',title:'报告',text:'正文',sources:[]});}throw Error('unexpected');}};
       await runOrchestration(cfg,store,g,{jobId:job,competitionId:id,idea});
       assert.match(prompt,/kind 为 user/);assert.match(prompt,/每天服药 5 次/);
     }finally{store.close();}
@@ -413,7 +413,7 @@ test('compete materials 导入用户资料，写作提示词把它当作可用�
 
 test('评审输出不是有效 JSON 时重试一次，而不是记为未评审',async()=>{
   const ctx=await setup(brief([item('方案报告',['docx'])]));
-  try{let reviews=0;const g={search:async()=>[],generate:async(role,prompt)=>{if(prompt.includes('拆解成可以实际制作的文件任务'))throw Error('规划不可用');if(prompt.includes('独立作品验收评审')){reviews++;return reviews===1?'{"issues":["被截断':JSON.stringify({issues:[]});}if(prompt.includes('直接创作'))return JSON.stringify({kind:'text',title:'报告',text:'正文',sources:[]});throw Error('unexpected');}};
+  try{let reviews=0;const g={search:async()=>[],generate:async(role,prompt)=>{if(prompt.includes('拆解成可以实际制作的文件任务'))throw Error('规划不可用');if(prompt.includes('任务：作品验收')){reviews++;return reviews===1?'{"issues":["被截断':JSON.stringify({issues:[]});}if(prompt.includes('直接创作'))return JSON.stringify({kind:'text',title:'报告',text:'正文',sources:[]});throw Error('unexpected');}};
     const result=await runOrchestration(ctx.cfg,ctx.store,g,{jobId:ctx.job,competitionId:ctx.id,idea});
     assert.equal(reviews,2);assert.equal(result.deliverables[0].review.pass,true);
   }finally{await ctx.done();}
@@ -423,7 +423,7 @@ async function formatServer(html){const {createServer}=await import('node:http')
 const formatGateway=(url,quote,writes)=>({search:async()=>[{url,title:'征文要求',snippet:''}],generate:async(role,prompt)=>{
   if(prompt.includes('没有写提交文件格式'))return JSON.stringify({items:[{deliverable:0,formats:['docx'],url,quote}]});
   if(prompt.includes('拆解成可以实际制作的文件任务'))throw Error('规划不可用');
-  if(prompt.includes('独立作品验收评审'))return JSON.stringify({issues:[]});
+  if(prompt.includes('任务：作品验收'))return JSON.stringify({issues:[]});
   if(prompt.includes('直接创作')){writes.push(prompt);return JSON.stringify({kind:'text',title:'论文',text:'正文',sources:[]});}
   throw Error('unexpected '+prompt.slice(0,40));}});
 
@@ -466,7 +466,7 @@ test('图片模型拒绝某个画面时只返工这张图，不中止整个任�
       generate:async(role,prompt)=>{
         if(prompt.includes('拆解成可以实际制作的文件任务'))return JSON.stringify({tasks:[documentTask({kind:'image',format:'png'})]});
         if(prompt.includes('设计一张独特的图片作品')){briefs.push(prompt);return JSON.stringify({image_prompt:'产品渲染',caption:''});}
-        if(prompt.includes('独立作品验收评审'))return JSON.stringify({issues:[]});
+        if(prompt.includes('任务：作品验收'))return JSON.stringify({issues:[]});
         throw Error('unexpected');}};
     const result=await runOrchestration(ctx.cfg,ctx.store,g,{jobId:ctx.job,competitionId:ctx.id,idea});
     assert.equal(draws,2);assert.match(briefs[1],/图片模型拒绝了上一版画面描述/);assert.equal(result.deliverables[0].review.pass,true);
@@ -478,7 +478,7 @@ test('最后一步把所有交付物汇总成一个最终提交包，按交付�
   try{
     const g={search:async()=>[],generate:async(role,prompt)=>{
       if(prompt.includes('拆解成可以实际制作的文件任务'))return JSON.stringify({tasks:[{id:'report',deliverable:0,title:'方案报告',kind:'document',format:'docx',instructions:'写方案',acceptance:['有方案']},{id:'deck',deliverable:1,title:'展示PPT',kind:'slides',format:'pptx',instructions:'展示',acceptance:['有封面']}],packages:[]});
-      if(prompt.includes('独立作品验收评审'))return JSON.stringify({issues:[]});
+      if(prompt.includes('任务：作品验收'))return JSON.stringify({issues:[]});
       if(prompt.includes('直接创作'))return JSON.stringify(prompt.includes('任务：展示PPT')?{kind:'slides',title:'展示',sources:[],slides:[{background:'FFFFFF',elements:[{type:'text',text:'封面',x:0.5,y:0.5,w:6,h:1,fontSize:28}]}]}:{kind:'text',title:'方案报告',text:'## 方案\n正文',sources:[]});
       throw Error('unexpected '+prompt.slice(0,40));}};
     const result=await runOrchestration(ctx.cfg,ctx.store,g,{jobId:ctx.job,competitionId:ctx.id,idea});

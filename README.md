@@ -38,6 +38,7 @@ flowchart TD
 src/
 ├── cli.ts                 # 命令行入口：组装配置、数据库、模型网关和命令
 ├── ui.ts                  # 交互式终端界面
+├── studio.ts              # LangGraph Studio 加载入口，导出四个可调试的图
 ├── agents/                 # Agent 执行、模型/供应商路由、提示词、可选运行时
 ├── competition/            # 赛事发现、网页与证据、队列审核和队列处理
 ├── core/                   # 配置、SQLite 数据存储、模型网关和共享类型
@@ -48,6 +49,7 @@ config/
 └── config.example.json     # 配置样例；本地 config/config.json 不提交
 deploy/
 └── entrypoint.sh           # Docker 容器入口
+langgraph.json              # LangGraph Studio 的图入口配置
 test/                       # Node 内置测试，先构建 src 到 dist 后运行
 data/                       # 运行时 SQLite、检查点、证据和任务产物（Git 忽略）
 ```
@@ -62,8 +64,10 @@ data/                       # 运行时 SQLite、检查点、证据和任务产�
 | `src/workflows/autonomous.ts`、`workflow.ts` | 自主选题/制作图，以及研究、翻译、报告图 |
 | `src/agents/agents.ts`、`models.ts`、`runtimes.ts`、`prompts.ts` | Agent 执行、模型配置、运行时管理和系统提示词 |
 | `src/core/config.ts`、`gateway.ts`、`store.ts`、`types.ts` | 配置校验、模型与搜索调用、SQLite 数据层、共享数据结构 |
+| `src/core/tracing.ts`、`src/studio.ts` | LangSmith 追踪包装、LangGraph Studio 图入口 |
 | `src/artifacts/` | 作品文件生成、官方模板填写、网页检查、PPT 预览 |
 | `config/config.example.json` | 可复制后修改的配置样例 |
+| `langgraph.json` | LangGraph Studio 的图入口与 Node 版本 |
 | `test/*.test.mjs` | 自动化测试；导入构建后的 `dist/` 模块 |
 
 运行数据默认写入 `data/`：`competition.sqlite` 保存赛事、来源、队列和任务记录；`checkpoints.sqlite` 保存 LangGraph 检查点；`jobs/<任务ID>/` 保存研究报告、来源记录、缓存、运行时会话和作品文件。可通过 `COMPETE_DATA_DIR` 更改数据目录，通过配置字段 `dataDir` 设置存储位置。
@@ -142,6 +146,8 @@ node dist/cli.js runtime-install opencode
 node dist/cli.js runtime-remove opencode
 ```
 
+`runtime-install` 调用 npm 安装固定版本，默认 15 分钟无结果就中止（`COMPETE_INSTALL_TIMEOUT_MS` 可调整），避免 registry 或代理卡住时一直等下去。
+
 Docker 镜像默认不含运行时，构建时可用 `--build-arg AGENT_RUNTIMES="claude-code opencode"` 预先下载。旧版配置中的 `writer`、`reviewer`、`image`、`coder`、`researchAgent` 字段仍可读取，在界面保存 Agent 设置后会转换为 `providers` 和 `agents`。
 
 搜索默认需要 Brave Search API；也可把配置里的 `search` 改成：
@@ -168,11 +174,47 @@ SearXNG 服务须启用 JSON 输出（`settings.yml` 的 `search.formats` 加入
 | `execution.plannerRounds` | 3 | 交付计划的生成与修正轮数上限，范围 1–5 |
 | `execution.researchRounds` | 3 | 依据已有证据继续提出查询的轮数上限，范围 1–6 |
 | `execution.requestTimeoutSeconds` | 300 | 普通模型和图片请求每次尝试的超时秒数，范围 30–1800 |
+| `execution.requestAttempts` | 3 | 一次模型调用最多尝试几次（含首次），范围 1–5；重试共享同一个总时限 |
 | `maxCalls` | 80 | 新任务默认预算单位；命令行 `--budget` 可覆盖 |
+
+一次模型调用的总时长上限是 `requestTimeoutSeconds × requestAttempts`（默认 900 秒）。重试不再各自重新计时：剩余时间不足时按剩余时间截断，最后一次失败直接返回，不再多等一轮退避。进度事件会写明本次调用最多持续多久，因此“仍在执行”不代表卡死。接口不响应时，命令会在该上限内失败并保存检查点。
+
+接口本身卡住时（例如返回 SSE 响应头后不再发送数据），只有超时机制能结束请求；把 `requestTimeoutSeconds` 调小可以让失败更快出现，但也会减少长文生成的成功机会。`requestAttempts=1` 表示不重试。
 
 轮数是上限，不会强制用满：制作通过、没有新的追查词或遇到无法继续的条件时提前结束。规划和制作轮数用于完整自主制作流程，不改变手动 `produce` 的翻译与报告流程。已写入配置的旧值会保留，不会仅因升级自动提高。
 
 研究和软件制作运行时的限制在“Agent 设置 → 修改 Agent 配置”中调整：`timeoutSeconds` 默认 1200 秒，范围 30–3600；`maxTurns` 默认分别为 8 和 20，范围 1–100。Claude Code 使用 `maxTurns` 和 `maxBudgetUsd`（默认 1 美元）；OpenCode 将 `maxTurns` 传为执行步骤 `steps`；Codex 没有在此接入内部轮数限制，由项目预算预留和执行超时约束。运行时的有限重试共享同一个截止时间，每次重试重新预留预算，不重置完整执行时长。
+
+### 追踪与可视化
+
+LangSmith 用于查看每次运行的图结构、节点耗时、模型输入输出和检索结果；LangGraph Studio 用于在本机浏览图结构和逐节点调试。两者都不改变 CLI 的命令行行为，也不参与队列和验收判断。
+
+配置写在项目 `.env` 中（已被 Git 忽略），CLI 启动时自动读取：
+
+```dotenv
+LANGSMITH_TRACING=true
+LANGSMITH_ENDPOINT=https://api.smith.langchain.com
+LANGSMITH_API_KEY=lsv2_pt_...
+LANGSMITH_PROJECT=competition-cli
+```
+
+`LANGSMITH_TRACING` 为 `true` 时上报，改为 `false` 或删除该行即关闭；关闭后追踪包装直接执行原函数，不联网。每次任务是一个 trace，节点运行挂在下面；`core/gateway.ts` 另外记录两类子运行：`run_type=llm` 的「写作调用／评审调用……」含系统提示词、用户提示词和模型原文，`run_type=tool` 的「搜索」含查询词与返回的标题和链接。图片只记录 mime 和字节数，不上传图片内容。trace 包含提示词与来源正文，会上传到 LangSmith 服务器；数据敏感时请关闭追踪，或把 `LANGSMITH_ENDPOINT` 指向自建实例。
+
+上报使用手动 flush：正常运行时只入队，命令结束前最多等 `COMPETITION_TRACE_FLUSH_TIMEOUT_MS`（默认 3000 毫秒）上传一次，超时就放弃本次上报并退出。单个上报请求的超时由 `COMPETITION_TRACE_TIMEOUT_MS`（默认 10000 毫秒）控制，不再重试。这样 LangSmith 变慢或不可用时不会拖住命令。
+
+```powershell
+npm run studio     # 启动本地 LangGraph API 服务，默认 http://127.0.0.1:2024
+```
+
+启动后**不要**直接访问 `http://127.0.0.1:2024/`：这个服务只提供 API 路由（`/ok`、`/info`、`/assistants` 等），根路径没有页面，会返回 404。可视化界面是 LangSmith 网站上的 Studio 页面，用下面的地址连接本地服务：
+
+```text
+https://smith.langchain.com/studio?baseUrl=http://localhost:2024
+```
+
+这条地址和 `- 🎨 Studio UI:` 那一行会由命令自己打印出来。设置 `BROWSER=none` 可禁用自动打开浏览器，只保留打印。打开后先在 Studio 里填入 LangSmith API Key 并选择 project，界面上方应能看到 `autonomous`、`research`、`translation`、`report` 四个图。
+
+`npm run studio` 读取根目录的 `langgraph.json`，加载 `src/studio.ts` 导出的四个图，并按 `.env` 读取密钥。Studio 会用自带检查点存储覆盖图中的 SqliteSaver，所以在 Studio 里跑的调试任务不写 `data/checkpoints.sqlite`，也不占用 `jobs` 预算；它适合看图和单节点调试，完整流程仍用 `npm start`。`langgraph.json` 的 `node_version` 是 Studio 服务端使用的 Node 版本。该命令依赖 `devDependencies` 中的 `@langchain/langgraph-cli`，`npm ci --omit=dev` 的部署环境没有它。
 
 ## 使用
 
@@ -238,7 +280,7 @@ node dist/cli.js stop <任务ID>
 
 暂停请求和停止请求持久化，status 返回 control，界面区分等待生效与已暂停。resume 对队列任务只重新排队，继续由 work 领取并核对赛事审核；独立任务直接从检查点继续。总预算不能低于已消耗量，也不清零已用量。已停止任务保留文件，普通 retry 不会再领取；需要重新制作时用 enqueue <赛事ID> --redo 创建新任务。已完成任务不能暂停或继续。
 
-独立任务与队列任务都有执行租约，防止两个进程同时恢复同一检查点；进程异常退出后需等待租约过期。暂停不是强行杀死进程，已经发出的外部请求无法撤回。
+独立任务与队列任务都有执行租约，防止两个进程同时恢复同一检查点。租约记录里带执行进程号：进程已经不存在时，下一次 `work` 或 `resume` 立即接管，不必等 5 分钟过期；进程还活着时，另一个进程仍会被拒绝。正常按 Ctrl+C 或关闭终端时，退出处理会同步释放租约。暂停不是强行杀死进程，已经发出的外部请求无法撤回。
 
 ### Agent 系统提示词
 
@@ -256,7 +298,7 @@ node dist/cli.js prompt-reset writer
 
 `research <赛事ID>` 可单独研究，`show <赛事ID>` 查看档案与来源。手动 `produce` 支持翻译和报告，使用 `node dist/cli.js produce --help` 查看参数；不属于队列的失败任务可用 `resume <任务ID> --budget 40` 恢复。
 
-队列存储在 `data/competition.sqlite`，每场任务的检查点和产物在数据目录中。`queued` 表示等待、`processing` 表示处理中、`completed` 表示流程结束、`failed` 表示执行中断，`paused` 表示已暂停，`stopped` 表示已停止；完成不代表作品符合全部要求。单场任务或审核失败会记录错误并继续处理同一批其他赛事；失败后 `retry` 再运行 `work`，继续原任务。进程被强制终止后，队列租约最长约 5 分钟过期，再运行 `work` 可恢复。不要同时让多个容器使用不支持 SQLite 锁语义的网络共享目录。
+队列存储在 `data/competition.sqlite`，每场任务的检查点和产物在数据目录中。`queued` 表示等待、`processing` 表示处理中、`completed` 表示流程结束、`failed` 表示执行中断，`paused` 表示已暂停，`stopped` 表示已停止；完成不代表作品符合全部要求。单场任务或审核失败会记录错误并继续处理同一批其他赛事；失败后 `retry` 再运行 `work`，继续原任务。进程被强制终止后，原进程已不在时直接运行 `work` 即可接管并恢复；租约到期（5 分钟）只用于判断旧版本记录。不要同时让多个容器使用不支持 SQLite 锁语义的网络共享目录。
 
 审核状态独立于处理状态：`unreviewed` 未审核、`valid` 通过、`invalid` 无效、`needs_review` 待人工确认。审核器读取公告和相关链接，由评审模型判断是否仍能报名或提交，并核对原文引用；缺少证据、截止时间不明或来源无法读取时标为待确认。自动审核每场最多调用一次评审模型，`--limit` 限制数量；`work` 在制作前会先审核不超过 `--limit` 场，只有审核通过的项目会被领取。结果可能出错，资格和截止时间仍需人工核对；可在界面人工修改审核结果。已确认的截止日期过期后不会继续进入制作。审核记录保存在数据库，删除队列项不会删除赛事档案、审核历史或已有任务产物。公告地址已有来源或任务后不能修改，以免混淆证据；请另加新赛事。
 

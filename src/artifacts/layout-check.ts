@@ -21,7 +21,7 @@ export async function officeAvailable():Promise<boolean>{try{await exec(officecl
 /** 渲染单页为 PNG；页码超出或渲染失败返回 null。 */
 async function shot(file:string,page:number,out:string):Promise<Buffer|null>{try{await exec(officecli(),['view',file,'screenshot','--page',String(page),'-o',out],{timeout:90_000,windowsHide:true,maxBuffer:4_000_000});const data=await readFile(out);return data.length?data:null;}catch{return null;}}
 
-const rubric=`你是文档排版审查员，现在看到的是 Word 文档渲染后的真实页面。只指出肉眼可见、会影响阅读的版面缺陷：Markdown 表格符号（竖线、横线）被当成普通文字显示而没有变成表格；单独成行的分隔线或代码围栏符号；星号、井号等未转换的 Markdown 标记；标题层级在字号和缩进上明显不连贯；文字溢出、重叠或被截断；图片缺失、位置错乱或没有图题；同类元素样式明显不统一。不评价内容质量，不因措辞、标点或个人偏好提意见。每条写清楚现象和改法，最多 5 条，没有缺陷时 issues 为空数组。只输出 JSON {"issues":["阻塞版面缺陷"],"suggestions":["可选改进"]}。`;
+const rubric=`任务：排版审查。现在看到的是 Word 文档渲染后的真实页面。只指出肉眼可见、会影响阅读的版面缺陷：Markdown 表格符号（竖线、横线）被当成普通文字显示而没有变成表格；单独成行的分隔线或代码围栏符号；星号、井号等未转换的 Markdown 标记；标题层级在字号和缩进上明显不连贯；文字溢出、重叠或被截断；图片缺失、位置错乱或没有图题；同类元素样式明显不统一。不评价内容质量，不因措辞、标点或个人偏好提意见。每条写清楚现象和改法，最多 5 条，没有缺陷时 issues 为空数组。只输出 JSON {"issues":["阻塞版面缺陷"],"suggestions":["可选改进"]}。`;
 
 /** 抽检若干页并汇总问题；没有看图能力、officecli 不可用或全部页面取不到时返回 null。 */
 export async function checkLayout(gateway:ModelGateway,file:string,pages:number[]=[1,2,3,5,8]):Promise<LayoutReport|null>{

@@ -10,6 +10,7 @@ import { runtimeReady } from '../agents/runtimes.js';
 import { runAgentTask, type Drivers } from '../agents/agents.js';
 import type { Store } from './store.js';
 import { saveJobProgress, type JobProgress } from './job-progress.js';
+import { traceLLM, traceTool } from './tracing.js';
 import { assertJobCanRun } from './job-control.js';
 
 /** 解析模型结构化输出；失败时保留模型原文，便于定位模型到底返回了什么。 */
@@ -35,7 +36,7 @@ export class OfficialGateway implements ModelGateway {
   this.onProgress?.({agent,model:a.model,provider:a.provider.label,...enriched});
   if(this.jobId)await saveJobProgress(this.cfg.dataDir,this.jobId,enriched);
  }
- private async tracked<T>(a:ResolvedAgent,action:string,run:()=>Promise<T>):Promise<T>{
+ private async tracked<T>(a:ResolvedAgent,action:string,run:()=>Promise<T>,limitMs?:number):Promise<T>{
   const started=Date.now();let writes=Promise.resolve();
   const emit=(message:string)=>{
     const job=this.jobId&&this.store?this.store.job(this.jobId):null;
@@ -43,19 +44,36 @@ export class OfficialGateway implements ModelGateway {
     this.onProgress?.({agent:a.name,model:a.model,provider:a.provider.label,...progress});
     if(this.jobId)writes=writes.then(()=>saveJobProgress(this.cfg.dataDir,this.jobId!,progress)).catch(()=>{});
   };
-  emit(action);const timer=setInterval(()=>emit(`${action}；仍在执行`),15_000);timer.unref();
+  // 明确写出本次调用最多会持续多久：只显示“仍在执行”无法区分慢请求和卡死。
+  const bound=limitMs?`；本次调用最多 ${Math.round(limitMs/1000)} 秒（含重试）`:'';
+  emit(action);const timer=setInterval(()=>emit(`${action}；仍在执行${bound}`),15_000);timer.unref();
   try{const result=await run();emit(`${action}完成`);return result;}
   catch(e){emit(`${action}未完成，保留已有进度`);throw e;}
   finally{clearInterval(timer);await writes;}
  }
  /** role 只决定任务类型；模型、供应商和系统提示词都按 agent 读取，未指定时与 role 相同。 */
  async generate(role:ModelRole,prompt:string,agent:AgentName=role){
-  this.charge();const a=this.agent(agent);try{const text=await this.tracked(a,'调用模型',()=>this.complete(a,promptOf(this.cfg,agent),prompt));if(!text.trim())throw Error(`${a.provider.label} 返回空内容`);this.onProgress?.({agent,model:a.model,provider:a.provider.label,action:'模型返回',raw:text});return text;}
+  this.charge();const a=this.agent(agent);try{const system=promptOf(this.cfg,agent);const budgetMs=executionSettings(this.cfg).requestTimeoutSeconds*executionSettings(this.cfg).requestAttempts*1000;const text=await this.tracked(a,'调用模型',()=>traceLLM(`${agentNames[agent]}调用`,
+   {agent,providerId:a.provider.id,providerLabel:a.provider.label,model:a.model,protocol:a.provider.protocol,ls_provider:a.provider.id,ls_model_name:a.model,...(this.jobId?{jobId:this.jobId}:{})},
+   system,prompt,()=>this.complete(a,system,prompt),value=>value),budgetMs);if(!text.trim())throw Error(`${a.provider.label} 返回空内容`);this.onProgress?.({agent,model:a.model,provider:a.provider.label,action:'模型返回',raw:text});return text;}
   catch(e){throw Error(`${agentNames[agent]}模型（${a.provider.label}）调用失败：${e instanceof Error?e.message:String(e)}；不会切换其他模型`);}
  }
- private async complete(a:ResolvedAgent,system:string,prompt:string):Promise<string>{let last:unknown;for(let attempt=0;attempt<5;attempt++){try{return await this.completeOnce(a,system,prompt);}catch(e){last=e;if(!this.retryable(e)||attempt===4)throw e;await new Promise(r=>setTimeout(r,Math.min(30000,2000*3**attempt)));}}throw last;}
+ private async complete(a:ResolvedAgent,system:string,prompt:string):Promise<string>{
+  // 重试共享同一个截止时间：否则“每次尝试都用完整超时”会让一次调用拖到几十分钟，外部看就是卡死。
+  const settings=executionSettings(this.cfg),deadline=Date.now()+settings.requestTimeoutSeconds*settings.requestAttempts*1000;let last:unknown;
+  for(let attempt=0;attempt<settings.requestAttempts;attempt++){
+    const remaining=deadline-Date.now();
+    if(remaining<=0)break;
+    try{return await this.completeOnce(a,system,prompt,Math.min(settings.requestTimeoutSeconds*1000,remaining));}
+    catch(e){last=e;if(!this.retryable(e))throw e;
+      // 最后一次失败直接抛出，不再空等一轮退避。
+      if(attempt===settings.requestAttempts-1)break;
+      const pause=Math.min(2000*3**attempt,30000,deadline-Date.now());if(pause<=0)break;await new Promise(r=>setTimeout(r,pause));}
+  }
+  throw last||Error(`模型调用超过 ${settings.requestTimeoutSeconds*settings.requestAttempts} 秒总时限`);
+ }
  private retryable(error:unknown){const message=error instanceof Error?error.message:String(error);return /timeout|timed out|aborted|fetch failed|network|socket|ECONN|429|500|502|503|504|52[0-4]|overloaded|temporar|rate.?limit/i.test(message);}
- private async completeOnce(a:ResolvedAgent,system:string,prompt:string):Promise<string>{const key=this.key(a),signal=AbortSignal.timeout(executionSettings(this.cfg).requestTimeoutSeconds*1000),p=a.provider;
+ private async completeOnce(a:ResolvedAgent,system:string,prompt:string,timeoutMs:number):Promise<string>{const key=this.key(a),signal=AbortSignal.timeout(timeoutMs),p=a.provider;
   if(p.protocol==='gemini'){const baseUrl=p.baseURL||process.env.COMPETE_GEMINI_BASE_URL;const response=await new GoogleGenAI({apiKey:key,...(baseUrl?{httpOptions:{baseUrl}}:{})}).models.generateContent({model:a.model,contents:prompt,config:{systemInstruction:system,abortSignal:signal}});return response.text||'';}
   if(p.protocol==='anthropic'){const deepseek=/(^|\.)deepseek\.com$/.test(p.baseURL?new URL(p.baseURL).hostname:'');const response=await new Anthropic({apiKey:key,maxRetries:0,...(p.baseURL?{baseURL:p.baseURL}:{})}).messages.create({model:a.model,max_tokens:8192,system,...(deepseek?{thinking:{type:'disabled' as const}}:{}),messages:[{role:'user',content:prompt}]},{signal});return response.content.filter(x=>x.type==='text').map(x=>x.text).join('\n');}
   // 流式请求：长文生成时中转站（Cloudflare 等）在约 100 秒无数据后会返回 524；服务端不支持流式而直接返回 JSON 时照常解析。
@@ -68,7 +86,7 @@ export class OfficialGateway implements ModelGateway {
   line(buffer+decoder.decode());return text;}
  /** 未传 options 时只取一页且不限时间，供研究往届资料使用；赛事发现会传入配置的页数和时间范围。 */
  async search(queryText:string,options:SearchOptions={}){const search=searchSettings(this.cfg);if(search.provider==='sources')throw Error('来源列表模式未配置全网关键词搜索');const pages=options.pages??1,timeRange=options.timeRange??'any';const found:SearchResult[]=[];
-  for(let page=1;page<=pages;page++){let batch:SearchResult[];try{batch=await this.searchPage(search,queryText,page,timeRange);}catch(e){if(page===1)throw e;break;}const fresh=batch.filter(x=>!found.some(y=>y.url===x.url));found.push(...fresh);if(!fresh.length)break;}
+  for(let page=1;page<=pages;page++){let batch:SearchResult[];try{batch=await traceTool(`${search.provider} 搜索`,{provider:search.provider,page,timeRange}, {query:queryText,page,timeRange},()=>this.searchPage(search,queryText,page,timeRange),value=>value.map(x=>`${x.title} ${x.url}`).join('\n'));}catch(e){if(page===1)throw e;break;}const fresh=batch.filter(x=>!found.some(y=>y.url===x.url));found.push(...fresh);if(!fresh.length)break;}
   return found;}
  private async searchPage(search:SearchSettings,queryText:string,page:number,timeRange:SearchOptions['timeRange']):Promise<SearchResult[]>{let url:URL;const headers:Record<string,string>={accept:'application/json'};
   if(search.provider==='brave'){if(!process.env.BRAVE_SEARCH_API_KEY)throw Error('缺少 BRAVE_SEARCH_API_KEY；也可配置 SearXNG');url=new URL(search.url||'https://api.search.brave.com/res/v1/web/search');url.searchParams.set('q',queryText);url.searchParams.set('count','20');if(page>1)url.searchParams.set('offset',String(Math.min(9,page-1)));const fresh={day:'pd',week:'pw',month:'pm',year:'py'} as Record<string,string>;if(timeRange&&fresh[timeRange])url.searchParams.set('freshness',fresh[timeRange]);headers['X-Subscription-Token']=process.env.BRAVE_SEARCH_API_KEY;}

@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { Store } from '../dist/core/store.js';
 import { processQueue } from '../dist/competition/queue.js';
 import { createServer } from 'node:http';
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 
 const approve=(store,id)=>store.setQueueReview(id,{decision:'valid',reason:'测试中人工确认',reviewer:'manual'});
@@ -42,4 +42,36 @@ test('CLI 扫描后立即持久入队，模型不可用时队列保留',async()=
   const dir=await mkdtemp(join(tmpdir(),'competition-queue-cli-'));const server=createServer((req,res)=>{if(req.url==='/contest'){res.setHeader('content-type','text/html; charset=utf-8');res.end('<title>大学生作品大赛通知</title><p>作品征集</p>');return;}res.setHeader('content-type','application/json');if(req.url==='/api/info')res.end(JSON.stringify({version:'2.2.0'}));else if(req.url?.startsWith('/api/model'))res.end(JSON.stringify({location:{},data:[]}));else{res.statusCode=404;res.end('{}');}});await new Promise(r=>server.listen(0,'127.0.0.1',r));
   try{const url=`http://127.0.0.1:${server.address().port}`,env={...process.env,COMPETE_DATA_DIR:dir,COMPETE_CONFIG:join(dir,'missing.json')};delete env.ANTHROPIC_API_KEY;delete env.GEMINI_API_KEY;delete env.GOOGLE_API_KEY;delete env.GOOGLE_GENERATIVE_AI_API_KEY;const run=promisify(execFile);const invoke=args=>run(process.execPath,['dist/cli.js',...args],{cwd:process.cwd(),env,timeout:20000});const scan=await invoke(['scan','--url',`${url}/contest`]);assert.equal(JSON.parse(scan.stdout).enqueued,true);assert.equal(JSON.parse((await invoke(['queue'])).stdout)[0].state,'queued');await assert.rejects(invoke(['work','--limit','1']),/模型不可用/);assert.equal(JSON.parse((await invoke(['queue'])).stdout)[0].state,'queued');
   }finally{server.close();await rm(dir,{recursive:true,force:true});}
+});
+
+test('执行进程被强制终止后，队列锁按进程号立即接管而不等租约到期',async()=>{
+  const dir=await mkdtemp(join(tmpdir(),'competition-queue-'));
+  try{
+    const id=(()=>{const store=new Store(dir);try{const id=store.addCompetition('https://example.com/crash','赛事');store.enqueue(id);approve(store,id);return id;}finally{store.close();}})();
+    // 先在一个独立进程里取得队列锁，再强杀它，模拟 Ctrl+C 或任务管理器结束进程。
+    const child=spawn(process.execPath,['-e',`import(${JSON.stringify(new URL('../dist/core/store.js',import.meta.url).href)}).then(({Store,leaseOwner})=>{const s=new Store(${JSON.stringify(dir)});s.acquireWorker(leaseOwner(),300000);console.log('locked');setInterval(()=>{},1000);});`],{stdio:['ignore','pipe','pipe']});
+    await new Promise((resolve,reject)=>{child.stdout.on('data',d=>{if(String(d).includes('locked'))resolve();});child.once('error',reject);});
+    child.kill('SIGKILL');
+    await new Promise(resolve=>child.once('exit',resolve));
+    const store=new Store(dir);
+    try{
+      const started=Date.now();let claimed;
+      await processQueue(store,{limit:1,budget:10,run:async t=>{claimed=t;store.setJob(t.jobId,'completed');return {};}});
+      assert.ok(claimed,'应领取上次中断的赛事');
+      assert.equal(claimed.competitionId,id);
+      assert.ok(Date.now()-started<10_000,'不必等待 5 分钟租约过期');
+    }finally{store.close();}
+  }finally{await rm(dir,{recursive:true,force:true});}
+});
+
+test('仍存活的执行进程不会被另一个进程抢走队列锁',async()=>{
+  const dir=await mkdtemp(join(tmpdir(),'competition-queue-'));
+  try{
+    const child=spawn(process.execPath,['-e',`import(${JSON.stringify(new URL('../dist/core/store.js',import.meta.url).href)}).then(({Store,leaseOwner})=>{const s=new Store(${JSON.stringify(dir)});s.acquireWorker(leaseOwner(),300000);console.log('locked');setInterval(()=>{},1000);});`],{stdio:['ignore','pipe','pipe']});
+    try{
+      await new Promise((resolve,reject)=>{child.stdout.on('data',d=>{if(String(d).includes('locked'))resolve();});child.once('error',reject);});
+      const store=new Store(dir);
+      try{assert.throws(()=>store.acquireWorker('other-owner',300000),/已有队列处理进程/);}finally{store.close();}
+    }finally{child.kill('SIGKILL');await new Promise(resolve=>child.once('exit',resolve));}
+  }finally{await rm(dir,{recursive:true,force:true});}
 });

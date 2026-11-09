@@ -17,6 +17,7 @@ import { startUI } from './ui.js';
 import { screenQueue } from './competition/screening.js';
 import { loadJobView } from './core/job-view.js';
 import { BrowserSuite, browserAvailability, inspectSoftware } from './artifacts/browser-checks.js';
+import { flushTracing, finishProcess } from './core/tracing.js';
 
 const program=new Command();
 program.name('compete').description('高校竞赛发现、研究和作品制作 CLI').version('0.1.0').option('-c, --config <path>','配置文件路径');
@@ -57,7 +58,7 @@ program.command('produce').description('制作翻译或报告作品').argument('
   const {cfg,store}=context();try{const c=store.competition(id);if(!c.brief) throw Error('请先执行 research，核对比赛交付要求');const types=new Set<string>();for(const d of c.brief.deliverables){if(/translation|翻译|译文|译稿/i.test(d.type))types.add('translation');if(/report|document|proposal|报告|文档|文稿|方案书|申报书/i.test(d.type))types.add('report');}const type=opts.type||(types.size===1?[...types][0]:null);if(!type)throw Error('无法唯一确定已支持的交付类型，请使用 --type 指定；不支持的类型请人工处理');if(!['translation','report'].includes(type))throw Error(`暂不支持作品类型：${type}；赛事档案已保留`); const job=store.createJob(id,type,{sourcePath:opts.source,targetLanguage:opts.target||'',instructions:opts.instructions||'',format:opts.format.toLowerCase()},opts.budget??cfg.maxCalls); console.log(`任务 ID: ${job}`); const result=await runJob(cfg,store,new OfficialGateway(cfg,store,job),job); print({jobId:job,outputPath:result.outputPath});}finally{store.close();}
 });
 program.command('status').description('查看任务、当前轮次、交付验收与证据记录').argument('<job-id>').action(async id=>{const {cfg,store}=context();try{print({job:store.job(id),control:store.jobControl(id)||null,view:await loadJobView(cfg.dataDir,id),artifacts:store.artifacts(id)});}finally{store.close();}});
-program.command('execution').description('查看长任务默认预算、轮次与超时设置').action(()=>{const cfg=loadConfig(program.opts().config);print({maxCalls:cfg.maxCalls,execution:executionSettings(cfg),runtimes:['research','coder'].map(name=>{const agent=resolveAgent(cfg,name as AgentName);return {agent:name,runtime:agent.runtime,maxTurns:agent.runtime==='codex'?null:agent.maxTurns,timeoutSeconds:agent.timeoutSeconds,maxBudgetUsd:agent.runtime==='claude-code'?agent.maxBudgetUsd:null};})});});
+program.command('execution').description('查看长任务默认预算、轮次与超时设置').action(()=>{const cfg=loadConfig(program.opts().config);const settings=executionSettings(cfg);print({maxCalls:cfg.maxCalls,execution:settings,requestBudgetSeconds:settings.requestTimeoutSeconds*settings.requestAttempts,runtimes:['research','coder'].map(name=>{const agent=resolveAgent(cfg,name as AgentName);return {agent:name,runtime:agent.runtime,maxTurns:agent.runtime==='codex'?null:agent.maxTurns,timeoutSeconds:agent.timeoutSeconds,maxBudgetUsd:agent.runtime==='claude-code'?agent.maxBudgetUsd:null};})});});
 program.command('queue').description('查看持久化赛事处理队列').action(()=>{const {store}=context();try{print(store.queue());}finally{store.close();}});
 program.command('queue-history').description('查看赛事的审核历史').argument('<competition-id>').action(id=>{const {store}=context();try{store.competition(id);print(store.queueReviewHistory(id));}finally{store.close();}});
 program.command('materials').description('导入你提供的资料（照片说明、实测数据、调研、个人信息等），下次生成时替换作品中的【待补充】').argument('<competition-id>').argument('<files...>','txt、md、docx 或 pdf 文件').action(async(id:string,files:string[])=>{
@@ -98,4 +99,6 @@ program.command('auto').description('自动发现赛事、追查往届作品、�
  const results=await workQueue(cfg,store,opts);print({discovered:ids.length,enqueued:added,processed:results});if(results.some(x=>x.error))process.exitCode=1;
  }finally{store.close();}
 });
-program.parseAsync().catch(e=>{console.error(`错误：${e instanceof Error?e.message:String(e)}`);process.exitCode=1;});
+// 命令结束后主动收尾：追踪上报限量，随后按退出码结束进程。
+// 只靠事件循环自然退出时，模型接口或上报的超时连接会继续占着 socket，看起来就是命令已经做完却卡住。
+program.parseAsync().catch(e=>{console.error(`错误：${e instanceof Error?e.message:String(e)}`);process.exitCode=1;}).then(()=>finishProcess(Number(process.exitCode??0)));

@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import type { Store } from './store.js';
+import { leaseOwner, trackLeaseOnExit } from './store.js';
 import type { ModelGateway } from './types.js';
 
 export class JobControlError extends Error {
@@ -19,8 +20,10 @@ export function controlledGateway(store:Store,id:string,gateway:ModelGateway,che
 }
 /** 独立任务和队列任务共用持久租约，阻止两个进程恢复同一检查点。 */
 export function beginJobRun(store:Store,id:string){
-  assertJobCanRun(store,id);const owner=randomUUID();store.acquireJobRun(id,owner,300_000);
+  assertJobCanRun(store,id);const owner=leaseOwner();store.acquireJobRun(id,owner,300_000);
   const assertLease=()=>{if(!store.ownsJobRun(id,owner))throw new JobLeaseError();};
   const timer=setInterval(()=>{try{store.heartbeatJobRun(id,owner,300_000);}catch{ /* 下一安全边界核对租约。 */ }},15_000);timer.unref();
-  return Object.assign(()=>{clearInterval(timer);store.releaseJobRun(id,owner);},{assert:assertLease});
+  // 进程被中断时立即释放租约，下一次 resume 不必等租约自然过期。
+  const detach=trackLeaseOnExit(()=>{clearInterval(timer);store.releaseJobRun(id,owner);});
+  return Object.assign(()=>{detach();store.releaseJobRun(id,owner);},{assert:assertLease});
 }

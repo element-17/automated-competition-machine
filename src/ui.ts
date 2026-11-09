@@ -84,13 +84,14 @@ async function inspectJob(cfg:AppConfig,store:Store,jobId?:string){
 
 async function executionMenu(cfg:AppConfig,configPath?:string):Promise<AppConfig>{
  const settings=executionSettings(cfg);
- p.note([`单项制作与验收：最多 ${settings.productionRounds} 轮`,`规划修正：最多 ${settings.plannerRounds} 轮`,`研究追查：最多 ${settings.researchRounds} 轮`,`普通模型请求超时：${settings.requestTimeoutSeconds} 秒`,`新任务默认预算：${cfg.maxCalls} 单位`,'制作通过即结束；提高上限不会强制用满轮数。研究/软件运行时的轮数与超时在各 Agent 配置中设置。'].join('\n'),'长任务设置');
+ p.note([`单项制作与验收：最多 ${settings.productionRounds} 轮`,`规划修正：最多 ${settings.plannerRounds} 轮`,`研究追查：最多 ${settings.researchRounds} 轮`,`普通模型请求超时：${settings.requestTimeoutSeconds} 秒`,`每次调用最多尝试 ${settings.requestAttempts} 次（总时长上限 ${settings.requestTimeoutSeconds*settings.requestAttempts} 秒）`,`新任务默认预算：${cfg.maxCalls} 单位`,'制作通过即结束；提高上限不会强制用满轮数。研究/软件运行时的轮数与超时在各 Agent 配置中设置。'].join('\n'),'长任务设置');
  const productionRounds=await p.text({message:'单项制作与验收最多轮数（1-8）',initialValue:String(settings.productionRounds),validate:intIn(1,8)});if(cancelled(productionRounds))return cfg;
  const plannerRounds=await p.text({message:'规划修正最多轮数（1-5）',initialValue:String(settings.plannerRounds),validate:intIn(1,5)});if(cancelled(plannerRounds))return cfg;
  const researchRounds=await p.text({message:'研究追查最多轮数（1-6）',initialValue:String(settings.researchRounds),validate:intIn(1,6)});if(cancelled(researchRounds))return cfg;
- const timeout=await p.text({message:'普通模型请求超时秒数（30-1800）',initialValue:String(settings.requestTimeoutSeconds),validate:intIn(30,1800)});if(cancelled(timeout))return cfg;
+ const timeout=await p.text({message:'普通模型请求单次超时秒数（30-1800）',initialValue:String(settings.requestTimeoutSeconds),validate:intIn(30,1800)});if(cancelled(timeout))return cfg;
+ const attempts=await p.text({message:`每次调用最多尝试次数（1-5，当前总时长上限 ${Number(timeout)*settings.requestAttempts} 秒）`,initialValue:String(settings.requestAttempts),validate:intIn(1,5)});if(cancelled(attempts))return cfg;
  const budget=await p.text({message:'新任务默认模型预算单位',initialValue:String(cfg.maxCalls),validate:v=>/^\d+$/.test(v||'')&&Number.isSafeInteger(Number(v))&&Number(v)>0?undefined:'请输入正整数'});if(cancelled(budget))return cfg;
- saveExecutionConfig(configPath,{productionRounds:Number(productionRounds),plannerRounds:Number(plannerRounds),researchRounds:Number(researchRounds),requestTimeoutSeconds:Number(timeout)},Number(budget));
+ saveExecutionConfig(configPath,{productionRounds:Number(productionRounds),plannerRounds:Number(plannerRounds),researchRounds:Number(researchRounds),requestTimeoutSeconds:Number(timeout),requestAttempts:Number(attempts)},Number(budget));
  p.log.success('长任务设置已保存。设置本身不改写已有任务；恢复队列时若使用更大的预算，会提高任务总上限。');return loadConfig(configPath);
 }
 
@@ -150,7 +151,7 @@ async function selectEntry(store:Store,message:string){
   if(choice==='n'){offset+=pageSize;continue;}
   if(choice==='p'){offset=Math.max(0,offset-pageSize);continue;}
   if(choice==='j'){
-   const pages=Math.ceil(count/pageSize),raw=await p.text({message:`跳转到第几页？（1-${pages}）`,defaultValue:String(Math.floor(offset/pageSize)+1),validate:value=>/^\\d+$/.test(value||'')&&Number(value)>=1&&Number(value)<=pages?undefined:`请输入 1-${pages} 的整数`});
+   const pages=Math.ceil(count/pageSize),raw=await p.text({message:`跳转到第几页？（1-${pages}）`,defaultValue:String(Math.floor(offset/pageSize)+1),validate:value=>/^\d+$/.test(value||'')&&Number(value)>=1&&Number(value)<=pages?undefined:`请输入 1-${pages} 的整数`});
    if(cancelled(raw))return null;
    offset=(Number(raw)-1)*pageSize;continue;
   }

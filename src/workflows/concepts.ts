@@ -46,7 +46,7 @@ export async function compareCandidates(cfg:AppConfig,store:Store,gateway:ModelG
   if(!ideas.length)return {choice:{selected:1,analysis:'没有生成候选方案',similarity_risks:[]},gaps};
   let choice:Choice;
   try{
-    const raw=await gateway.generate('reviewer',`${Guard}\n你是独立作品评审。比较以下 ${ideas.length} 个候选方案，按规则适配、可行性、差异性和可验证性选择一个。必须结合下面实际获取的相似作品正文比较机制；词面相似度不是抄袭判定。无搜索结果、不可读网页或证据不足均不代表原创。不要编造来源。只输出 JSON {"selected":1,"analysis":"说明选择理由和证据限制","similarity_risks":["风险及对应来源URL或未核实项"]}，selected 必须在 1 到 ${ideas.length} 之间。规则：${JSON.stringify(brief)}\n候选：${JSON.stringify(ideas)}\n已获取的相似作品资料：${JSON.stringify(evidence)}\n词面相似度提示：${JSON.stringify(pairs)}`,'reviewer');
+    const raw=await gateway.generate('reviewer',`${Guard}\n任务：候选比较。以下是 ${ideas.length} 个候选方案，按规则适配、可行性、差异性和可验证性选择一个。必须结合下面实际获取的相似作品正文比较机制；词面相似度不是抄袭判定。无搜索结果、不可读网页或证据不足均不代表原创。不要编造来源。只输出 JSON {"selected":1,"analysis":"说明选择理由和证据限制","similarity_risks":["风险及对应来源URL或未核实项"]}，selected 必须在 1 到 ${ideas.length} 之间。规则：${JSON.stringify(brief)}\n候选：${JSON.stringify(ideas)}\n已获取的相似作品资料：${JSON.stringify(evidence)}\n词面相似度提示：${JSON.stringify(pairs)}`,'reviewer');
     choice=z.object({selected:z.number().int().min(1).max(ideas.length),analysis:z.string().min(1),similarity_risks:z.array(z.string()).default([])}).parse(parseJSON(raw));
   }catch(e){
     if(isJobControlError(e))throw e;

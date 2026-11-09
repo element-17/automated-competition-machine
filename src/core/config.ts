@@ -26,6 +26,8 @@ const Execution=z.object({
   plannerRounds:z.number().int().min(1).max(5).default(3),
   researchRounds:z.number().int().min(1).max(6).default(3),
   requestTimeoutSeconds:z.number().int().min(30).max(1800).default(300),
+  /** 一次模型调用最多尝试几次（含首次）；总时长上限 = 本次数 × requestTimeoutSeconds，重试共享该上限。 */
+  requestAttempts:z.number().int().min(1).max(5).default(3),
 });
 export type ExecutionSettings=z.infer<typeof Execution>;
 export const executionSettings=(cfg:{execution?:Partial<ExecutionSettings>}):ExecutionSettings=>Execution.parse(cfg.execution||{});

@@ -20,7 +20,7 @@ test('实际浏览器失败驱动第二轮修复，沿用首轮用例并保留�
   const gateway={search:async()=>[],generate:async(_role,prompt)=>{
    if(prompt.includes('拆解成可以实际制作的文件任务'))return JSON.stringify(plan);
    if(prompt.includes('为实际网页交付物设计浏览器验收用例')){suites++;return JSON.stringify(suite);}
-   if(prompt.includes('独立作品验收评审')){reviews++;return JSON.stringify({pass:true,issues:[]});}throw Error('unexpected');
+   if(prompt.includes('任务：作品验收')){reviews++;return JSON.stringify({pass:true,issues:[]});}throw Error('unexpected');
   },buildProject:async(folder,prompt)=>{builds++;if(builds===2)assert.match(prompt,/浏览器实测/);await writeFile(join(folder,'index.html'),html(builds===1?'2':'1'));}};
   const result=await runOrchestration(c.cfg,c.store,gateway,{jobId:c.job,competitionId:c.id,idea:null});
   assert.equal(builds,2);assert.equal(suites,1);assert.equal(reviews,1);
@@ -36,7 +36,7 @@ test('软件制作后暂停保存归档，恢复只继续浏览器与内容验�
   const gateway={search:async()=>[],generate:async(_role,prompt)=>{
    if(prompt.includes('拆解成可以实际制作的文件任务'))return JSON.stringify(plan);
    if(prompt.includes('为实际网页交付物设计浏览器验收用例'))return JSON.stringify(suite);
-   if(prompt.includes('独立作品验收评审'))return JSON.stringify({pass:true,issues:[]});throw Error('unexpected');
+   if(prompt.includes('任务：作品验收'))return JSON.stringify({pass:true,issues:[]});throw Error('unexpected');
   },buildProject:async(folder)=>{builds++;await writeFile(join(folder,'index.html'),html('1'));c.store.requestJobControl(c.job,'pause');}};
   await assert.rejects(runOrchestration(c.cfg,c.store,gateway,{jobId:c.job,competitionId:c.id,idea:null}),/暂停/);
   const folder=join(c.dir,'jobs',c.job),state=(await readdir(folder)).find(n=>n.endsWith('-r1-state.json'));assert.ok(state);const saved=JSON.parse(await readFile(join(folder,state),'utf8'));assert.match(await readFile(saved.attempt.paths[0],'utf8'),/计数器/);
