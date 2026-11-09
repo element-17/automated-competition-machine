@@ -6,7 +6,6 @@ import { join } from 'node:path';
 import JSZip from 'jszip';
 import { Brief } from '../dist/core/types.js';
 import { parseBounds, fixedFileName, measureArtifact, checkDelivery, checkLimits } from '../dist/artifacts/delivery-checks.js';
-import { evaluateSuite } from '../dist/core/evaluation.js';
 import { renderWork, Work } from '../dist/artifacts/artifacts.js';
 
 test('确定性规则只解析完整且无歧义的数值限制',()=>{
@@ -37,12 +36,3 @@ test('页数读取实际 PPTX，附件检查读取实际压缩包目录',async()
   }finally{await rm(dir,{recursive:true,force:true});}
 });
 
-test('离线评估对同一规则比较实际文件，区分机械检查和作品质量',async()=>{
-  const dir=await mkdtemp(join(tmpdir(),'delivery-eval-'));try{
-    await writeFile(join(dir,'report.txt'),'真实文件');const path=join(dir,'case.json'),out=join(dir,'result.json');
-    const suite={cases:[{id:'same-rules',brief:{title:'比赛',deliverables:[{type:'报告',formats:['txt'],quantity:'1份',naming:'report.txt'}]},runs:[{name:'valid',files:[{deliverable:0,path:'report.txt'}]},{name:'missing',files:[]}]}]};
-    await writeFile(path,JSON.stringify(suite));const report=await evaluateSuite(path,out);assert.equal(report.cases[0].runs[0].status,'mechanical_checks_passed');assert.equal(report.cases[0].runs[1].status,'failed');
-    assert.match(report.scope,/不评判真实性/);assert.deepEqual(JSON.parse(await readFile(out,'utf8')),report);
-    suite.cases[0].runs[0].files[0].path='../outside.txt';await writeFile(path,JSON.stringify(suite));await assert.rejects(evaluateSuite(path),/超出案例目录/);
-  }finally{await rm(dir,{recursive:true,force:true});}
-});

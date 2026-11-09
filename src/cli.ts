@@ -15,7 +15,6 @@ import { discoverCompetitions, plannedQueries, siteOf, SCREEN_RECORD } from './c
 import { processQueue } from './competition/queue.js';
 import { startUI } from './ui.js';
 import { screenQueue } from './competition/screening.js';
-import { evaluateSuite } from './core/evaluation.js';
 import { loadJobView } from './core/job-view.js';
 import { BrowserSuite, browserAvailability, inspectSoftware } from './artifacts/browser-checks.js';
 
@@ -23,7 +22,6 @@ const program=new Command();
 program.name('compete').description('高校竞赛发现、研究和作品制作 CLI').version('0.1.0').option('-c, --config <path>','配置文件路径');
 program.action(()=>process.stdin.isTTY&&process.stdout.isTTY?startUI(program.opts().config):program.outputHelp());
 program.command('ui').description('打开交互式终端界面').action(()=>startUI(program.opts().config));
-program.command('evaluate').description('离线比较同一赛事规则下的实际交付文件，不调用模型').argument('<case-file>','包含 brief 和各执行结果的 JSON 文件').option('-o, --output <path>','保存 JSON 检查报告').action(async(path,opts)=>{print(await evaluateSuite(path,opts.output));});
 program.command('browser-check').description('在隔离浏览器中检查实际 HTML/ZIP，不调用模型').argument('<artifact>').requiredOption('-o, --output <folder>','截图和报告目录').option('--suite <json>','声明式关键操作用例').action(async(path,opts)=>{const suite=opts.suite?BrowserSuite.parse(JSON.parse(readFileSync(opts.suite,'utf8'))):undefined;const report=await inspectSoftware(path,opts.output,suite);print(report);if(report.status==='failed')process.exitCode=1;});
 program.command('browser-status').description('查看浏览器验收环境').action(()=>print(browserAvailability()));
 function context(){const cfg=loadConfig(program.opts().config); const store=new Store(cfg.dataDir); return {cfg,store,gateway:new OfficialGateway(cfg,store)};}

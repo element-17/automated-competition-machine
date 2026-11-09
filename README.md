@@ -101,19 +101,6 @@ data/                       # 运行时 SQLite、检查点、证据和任务产�
 
 当前尚未证明这套系统比“同一模型＋通用 Agent＋赛事提示词”质量更高。后续对照应固定赛事、来源、模型和预算，比较合格交付率、人工修改时间、失败恢复后的重复调用、漏件和违规率，再决定是否值得增加更多角色。浏览器验收已接入软件返工闭环；自动视觉验收、真实模型质量对照仍未完成。
 
-### 离线交付对照
-
-`evaluate` 使用同一份赛事档案检查多个执行器的实际文件，不调用模型或读取 API 密钥。先运行内置的检查器示例：
-
-```powershell
-node dist/cli.js evaluate evaluation/example.json
-node dist/cli.js evaluate evaluation/example.json --output data/evaluation-example.json
-```
-
-示例只演示正常文件和缺件的区别，不是模型质量评测。真实对照可以复制 `evaluation/example.json`，为每个案例填写同一份 `brief`，把项目与通用 Agent 的输出分别加入 `runs`；文件路径相对于案例 JSON 所在目录，不能越出该目录。每个文件用 `deliverable` 关联交付物的零起始下标。可选 `usage` 记录 `model`、`budget`、`modelCalls`、`elapsedMs` 和 `manualReviewMinutes`，这些是填报值，检查器不验证其真实性。
-
-结果仅使用 `mechanical_checks_passed`、`needs_review` 和 `failed` 表示可测量规则的状态，不把文件检查通过等同于内容真实、原创、视觉合格或功能可用。内容质量和真实人工修改时间仍需通过实际任务对照取得。
-
 ## 安装和配置
 
 需要 Node.js 24，以及可访问相应服务的服务器和模型权限。模型 ID 只是示例，请按账户可用情况在 `config/config.json` 中配置。
@@ -232,10 +219,9 @@ node dist/cli.js auto --url 'https://主办方公告地址' --budget 120
 ~~~powershell
 npx playwright install chromium
 node dist/cli.js browser-status
-node dist/cli.js browser-check evaluation/browser-example/index.html --suite evaluation/browser-example/suite.json --output data/browser-example
 ~~~
 
-browser-check 不调用模型，不需要 API 密钥。不传 --suite 只做页面检查，不会标记完整交互验收通过。该示例用于验证验收器，不是参赛质量评测。
+browser-check 不调用模型，不需要 API 密钥。不传 --suite 只做页面检查，不会标记完整交互验收通过。
 
 ### 暂停、继续和停止
 
