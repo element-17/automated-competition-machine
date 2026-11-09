@@ -4,8 +4,6 @@
   "env": ".env",
   "graphs": {
     "autonomous": "./src/studio.ts:autonomous",
-    "research": "./src/studio.ts:research",
-    "translation": "./src/studio.ts:translation",
-    "report": "./src/studio.ts:report"
+    "research": "./src/studio.ts:research"
   }
 }

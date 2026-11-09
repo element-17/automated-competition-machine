@@ -56,19 +56,19 @@ data/                       # 运行时 SQLite、检查点、证据和任务产�
 
 主要调用关系：`cli.ts` 进入 `competition/` 发现并审核赛事，`queue.ts` 领取任务后调用 `workflows/autonomous.ts`；自主流程复用 `workflows/workflow.ts` 中的研究图，再调用 `agents/` 访问模型和执行器、使用 `competition/sources.ts` 保存来源，最后由 `artifacts/` 生成和检查交付物。`core/store.ts` 保存赛事、队列和产物索引；LangGraph 检查点单独保存在数据目录。
 
-| 文件/目录 | 职责 |
-| --- | --- |
-| `src/cli.ts`、`src/ui.ts` | CLI 命令注册和交互式终端操作 |
-| `src/competition/discovery.ts`、`screening.ts`、`queue.ts` | 搜索赛事、筛选公告、审核队列、租约与失败重试 |
-| `src/competition/sources.ts` | 获取网页和附件、提取内容、写入证据记录 |
-| `src/workflows/autonomous.ts`、`workflow.ts` | 自主选题/制作图，以及研究、翻译、报告图 |
-| `src/agents/agents.ts`、`models.ts`、`runtimes.ts`、`prompts.ts` | Agent 执行、模型配置、运行时管理和系统提示词 |
-| `src/core/config.ts`、`gateway.ts`、`store.ts`、`types.ts` | 配置校验、模型与搜索调用、SQLite 数据层、共享数据结构 |
-| `src/core/tracing.ts`、`src/studio.ts` | LangSmith 追踪包装、LangGraph Studio 图入口 |
-| `src/artifacts/` | 作品文件生成、官方模板填写、网页检查、PPT 预览 |
-| `config/config.example.json` | 可复制后修改的配置样例 |
-| `langgraph.json` | LangGraph Studio 的图入口与 Node 版本 |
-| `test/*.test.mjs` | 自动化测试；导入构建后的 `dist/` 模块 |
+| 文件/目录                                                        | 职责                                                  |
+| ---------------------------------------------------------------- | ----------------------------------------------------- |
+| `src/cli.ts`、`src/ui.ts`                                        | CLI 命令注册和交互式终端操作                          |
+| `src/competition/discovery.ts`、`screening.ts`、`queue.ts`       | 搜索赛事、筛选公告、审核队列、租约与失败重试          |
+| `src/competition/sources.ts`                                     | 获取网页和附件、提取内容、写入证据记录                |
+| `src/workflows/autonomous.ts`、`workflow.ts`                     | 自主选题/制作图，以及研究、翻译、报告图               |
+| `src/agents/agents.ts`、`models.ts`、`runtimes.ts`、`prompts.ts` | Agent 执行、模型配置、运行时管理和系统提示词          |
+| `src/core/config.ts`、`gateway.ts`、`store.ts`、`types.ts`       | 配置校验、模型与搜索调用、SQLite 数据层、共享数据结构 |
+| `src/core/tracing.ts`、`src/studio.ts`                           | LangSmith 追踪包装、LangGraph Studio 图入口           |
+| `src/artifacts/`                                                 | 作品文件生成、官方模板填写、网页检查、PPT 预览        |
+| `config/config.example.json`                                     | 可复制后修改的配置样例                                |
+| `langgraph.json`                                                 | LangGraph Studio 的图入口与 Node 版本                 |
+| `test/*.test.mjs`                                                | 自动化测试；导入构建后的 `dist/` 模块                 |
 
 运行数据默认写入 `data/`：`competition.sqlite` 保存赛事、来源、队列和任务记录；`checkpoints.sqlite` 保存 LangGraph 检查点；`jobs/<任务ID>/` 保存研究报告、来源记录、缓存、运行时会话和作品文件。可通过 `COMPETE_DATA_DIR` 更改数据目录，通过配置字段 `dataDir` 设置存储位置。
 
@@ -87,13 +87,13 @@ data/                       # 运行时 SQLite、检查点、证据和任务产�
 
 持续处理多场比赛时，程序应提供这些可检查的行为：
 
-| 能力 | 程序承担的约束 | 当前边界 |
-| --- | --- | --- |
-| 持久执行 | SQLite 原子领取、租约、预算计数与检查点 | 成熟通用 Agent 也能提供；不是独有能力 |
-| 证据记录 | 保存实际获取的网页，逐字核对来源引用 | 引用出现不代表来源权威，也不证明推论正确 |
-| 交付约束 | 规划校验格式、数量、ZIP 归属；从实际文件检查大小、页数、尺寸、固定文件名和附件名 | 字数口径不清、个人信息占位、复杂数量与附件描述保留为待核实 |
-| 验收状态 | `deliverables.json` 分别记录格式、内容、视觉或交互检查；模型的 `pass` 不能代替未执行的检查 | 内容评审仍是模型判断；`submission` 也需要人工终审 |
-| 恢复完整性 | 跳过任务前比对输入指纹、产物路径和 SHA256；缺失或变化则重新制作/评审 | 上游研究检查点不会自动重新获取更新后的公告；不是外部事实的实时监控 |
+| 能力       | 程序承担的约束                                                                             | 当前边界                                                           |
+| ---------- | ------------------------------------------------------------------------------------------ | ------------------------------------------------------------------ |
+| 持久执行   | SQLite 原子领取、租约、预算计数与检查点                                                    | 成熟通用 Agent 也能提供；不是独有能力                              |
+| 证据记录   | 保存实际获取的网页，逐字核对来源引用                                                       | 引用出现不代表来源权威，也不证明推论正确                           |
+| 交付约束   | 规划校验格式、数量、ZIP 归属；从实际文件检查大小、页数、尺寸、固定文件名和附件名           | 字数口径不清、个人信息占位、复杂数量与附件描述保留为待核实         |
+| 验收状态   | `deliverables.json` 分别记录格式、内容、视觉或交互检查；模型的 `pass` 不能代替未执行的检查 | 内容评审仍是模型判断；`submission` 也需要人工终审                  |
+| 恢复完整性 | 跳过任务前比对输入指纹、产物路径和 SHA256；缺失或变化则重新制作/评审                       | 上游研究检查点不会自动重新获取更新后的公告；不是外部事实的实时监控 |
 
 规划和模型缓存按输入版本保存，产物按任务输入及制作轮次分目录，返工不会覆盖上一轮。`orchestration.json` 和 JSON 缓存采用同目录临时文件替换；`resume-checks.json` 记录每项是否复用及原因。旧任务没有收据时会重新执行制作验收；如果模型输入未变，可以从已缓存正文重建丢失的文件。打包读取已生成的作品归档，不重新读取可变的软件工作区。
 
@@ -128,11 +128,11 @@ node dist/cli.js doctor
 - 运行时下载：Claude Code、Codex、OpenCode 不随 `npm ci` 安装。程序会先检测本机已安装的 CLI（npm 全局包或 PATH）：已安装 Claude Code 或 Codex 时只需下载 SDK（约 55 MB / 1 MB），并使用本机版本；否则下载完整版到 `runtimes/` 目录（约 290 / 470 / 400 MB，可用 `COMPETE_RUNTIME_DIR` 修改）。OpenCode 已安装在本机时无需下载。状态显示为“已下载”“使用本机”“本机已装，缺 SDK”或“未下载”。设置 `COMPETE_SYSTEM_RUNTIMES=0` 可不使用本机版本。
 - 系统提示词：见下文。
 
-| 协议 | 说明 | 可用运行时 |
-| --- | --- | --- |
-| Gemini API | Google Gemini | OpenCode |
-| Anthropic Messages | Claude；DeepSeek 等兼容服务需填 Base URL | Claude Code、OpenCode |
-| OpenAI 兼容（Chat Completions） | OpenAI 及各类兼容服务 | Codex（需支持 Responses API）、OpenCode |
+| 协议                            | 说明                                     | 可用运行时                              |
+| ------------------------------- | ---------------------------------------- | --------------------------------------- |
+| Gemini API                      | Google Gemini                            | OpenCode                                |
+| Anthropic Messages              | Claude；DeepSeek 等兼容服务需填 Base URL | Claude Code、OpenCode                   |
+| OpenAI 兼容（Chat Completions） | OpenAI 及各类兼容服务                    | Codex（需支持 Responses API）、OpenCode |
 
 图片生成目前只支持 Gemini 协议。Claude Code 连接非官方地址时，研究 Agent 只开放 WebFetch，因为 WebSearch 是 Anthropic 服务端工具。运行时只获得当前 Agent 的密钥，主目录与用户全局配置隔离；编码 Agent 只能写入工作区，不能执行 shell。
 
@@ -153,7 +153,7 @@ Docker 镜像默认不含运行时，构建时可用 `--build-arg AGENT_RUNTIMES
 搜索默认需要 Brave Search API；也可把配置里的 `search` 改成：
 
 ```json
-{"provider":"searxng","url":"http://127.0.0.1:8080"}
+{ "provider": "searxng", "url": "http://127.0.0.1:8080" }
 ```
 
 SearXNG 服务须启用 JSON 输出（`settings.yml` 的 `search.formats` 加入 `json`）。可在 `sources` 中配置赛事列表页；系统同时搜索并读取这些页面。
@@ -168,14 +168,14 @@ SearXNG 服务须启用 JSON 输出（`settings.yml` 的 `search.formats` 加入
 
 交互界面的“长任务设置”可调整以下项目，也可直接编辑配置；`node dist/cli.js execution` 显示当前有效设置。
 
-| 配置字段 | 默认值 | 含义 |
-| --- | --- | --- |
-| `execution.productionRounds` | 4 | 每项交付物的制作与验收轮数上限，范围 1–8 |
-| `execution.plannerRounds` | 3 | 交付计划的生成与修正轮数上限，范围 1–5 |
-| `execution.researchRounds` | 3 | 依据已有证据继续提出查询的轮数上限，范围 1–6 |
-| `execution.requestTimeoutSeconds` | 300 | 普通模型和图片请求每次尝试的超时秒数，范围 30–1800 |
-| `execution.requestAttempts` | 3 | 一次模型调用最多尝试几次（含首次），范围 1–5；重试共享同一个总时限 |
-| `maxCalls` | 80 | 新任务默认预算单位；命令行 `--budget` 可覆盖 |
+| 配置字段                          | 默认值 | 含义                                                               |
+| --------------------------------- | ------ | ------------------------------------------------------------------ |
+| `execution.productionRounds`      | 4      | 每项交付物的制作与验收轮数上限，范围 1–8                           |
+| `execution.plannerRounds`         | 3      | 交付计划的生成与修正轮数上限，范围 1–5                             |
+| `execution.researchRounds`        | 3      | 依据已有证据继续提出查询的轮数上限，范围 1–6                       |
+| `execution.requestTimeoutSeconds` | 300    | 普通模型和图片请求每次尝试的超时秒数，范围 30–1800                 |
+| `execution.requestAttempts`       | 3      | 一次模型调用最多尝试几次（含首次），范围 1–5；重试共享同一个总时限 |
+| `maxCalls`                        | 80     | 新任务默认预算单位；命令行 `--budget` 可覆盖                       |
 
 一次模型调用的总时长上限是 `requestTimeoutSeconds × requestAttempts`（默认 900 秒）。重试不再各自重新计时：剩余时间不足时按剩余时间截断，最后一次失败直接返回，不再多等一轮退避。进度事件会写明本次调用最多持续多久，因此“仍在执行”不代表卡死。接口不响应时，命令会在该上限内失败并保存检查点。
 
@@ -212,9 +212,9 @@ npm run studio     # 启动本地 LangGraph API 服务，默认 http://127.0.0.1
 https://smith.langchain.com/studio?baseUrl=http://localhost:2024
 ```
 
-这条地址和 `- 🎨 Studio UI:` 那一行会由命令自己打印出来。设置 `BROWSER=none` 可禁用自动打开浏览器，只保留打印。打开后先在 Studio 里填入 LangSmith API Key 并选择 project，界面上方应能看到 `autonomous`、`research`、`translation`、`report` 四个图。
+这条地址和 `- 🎨 Studio UI:` 那一行会由命令自己打印出来。设置 `BROWSER=none` 可禁用自动打开浏览器，只保留打印。打开后先在 Studio 里填入 LangSmith API Key 并选择 project，界面上方应能看到 `autonomous` 和 `research` 两个图。
 
-`npm run studio` 读取根目录的 `langgraph.json`，加载 `src/studio.ts` 导出的四个图，并按 `.env` 读取密钥。Studio 会用自带检查点存储覆盖图中的 SqliteSaver，所以在 Studio 里跑的调试任务不写 `data/checkpoints.sqlite`，也不占用 `jobs` 预算；它适合看图和单节点调试，完整流程仍用 `npm start`。`langgraph.json` 的 `node_version` 是 Studio 服务端使用的 Node 版本。该命令依赖 `devDependencies` 中的 `@langchain/langgraph-cli`，`npm ci --omit=dev` 的部署环境没有它。
+`npm run studio` 读取根目录的 `langgraph.json`，加载 `src/studio.ts` 导出的两个图，并按 `.env` 读取密钥。Studio 会用自带检查点存储覆盖图中的 SqliteSaver，所以在 Studio 里跑的调试任务不写 `data/checkpoints.sqlite`，也不占用 `jobs` 预算；它适合看图和单节点调试，完整流程仍用 `npm start`。`langgraph.json` 的 `node_version` 是 Studio 服务端使用的 Node 版本。该命令依赖 `devDependencies` 中的 `@langchain/langgraph-cli`，`npm ci --omit=dev` 的部署环境没有它。
 
 ## 使用
 
@@ -258,10 +258,10 @@ node dist/cli.js auto --url 'https://主办方公告地址' --budget 120
 
 浏览器依赖使用 Playwright，Chromium 单独安装；Windows 也可使用检测到的 Edge/Chrome。可通过 COMPETE_BROWSER_EXECUTABLE 指定可执行文件。首次使用：
 
-~~~powershell
+```powershell
 npx playwright install chromium
 node dist/cli.js browser-status
-~~~
+```
 
 browser-check 不调用模型，不需要 API 密钥。不传 --suite 只做页面检查，不会标记完整交互验收通过。
 
@@ -269,14 +269,14 @@ browser-check 不调用模型，不需要 API 密钥。不传 --suite 只做页�
 
 任务详情提供控制菜单。交互界面处理队列时，按 P 或 Ctrl+C 请求暂停，按 S 请求停止；程序让当前调用完成并保存成果，再在安全边界结束本批处理。等待期间仍可能产生当前调用的费用，也可能要等待该调用的超时上限。可在另一终端控制正在运行的任务：
 
-~~~powershell
+```powershell
 node dist/cli.js pause <任务ID>
 node dist/cli.js status <任务ID>
 node dist/cli.js budget <任务ID> 120
 node dist/cli.js resume <任务ID>
 node dist/cli.js work --limit 1
 node dist/cli.js stop <任务ID>
-~~~
+```
 
 暂停请求和停止请求持久化，status 返回 control，界面区分等待生效与已暂停。resume 对队列任务只重新排队，继续由 work 领取并核对赛事审核；独立任务直接从检查点继续。总预算不能低于已消耗量，也不清零已用量。已停止任务保留文件，普通 retry 不会再领取；需要重新制作时用 enqueue <赛事ID> --redo 创建新任务。已完成任务不能暂停或继续。
 

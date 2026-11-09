@@ -1,15 +1,96 @@
-import { z } from 'zod';
-import type { AgentName } from '../agents/prompts.js';
-import type { JobProgress } from './job-progress.js';
+import { z } from "zod";
+import type { AgentName } from "../agents/prompts.js";
+import type { JobProgress } from "./job-progress.js";
 
-export const Deliverable = z.object({ type: z.string(), quantity: z.string().nullable().default(null), formats: z.array(z.string()).default([]), limits: z.array(z.string()).default([]), naming: z.string().nullable().default(null), attachments: z.array(z.string()).default([]), submission: z.string().nullable().default(null), official_template: z.string().nullable().default(null) });
-export const ResearchProof = z.object({url:z.string(),quote:z.string(),title:z.string().default('')});
-export const ResearchCoverage = z.object({past_winners:z.array(ResearchProof).default([]),past_works:z.array(ResearchProof).default([]),judging:z.array(ResearchProof).default([]),missing:z.array(z.string()).default([])});
-export const Brief = z.object({ title: z.string(), edition: z.string().nullable().default(null), eligibility: z.string().nullable().default(null), deadline: z.string().nullable().default(null), ai_rules: z.string().nullable().default(null), scoring: z.string().nullable().default(null), deliverables: z.array(Deliverable).default([]), requires_idea: z.boolean().nullable().default(null), missing: z.array(z.string()).default([]), citations: z.array(z.object({field:z.string(),url:z.string(),quote:z.string()})).default([]),research:ResearchCoverage.default({past_winners:[],past_works:[],judging:[],missing:[]}) });
+export const Deliverable = z.object({
+  type: z.string(),
+  quantity: z.string().nullable().default(null),
+  formats: z.array(z.string()).default([]),
+  limits: z.array(z.string()).default([]),
+  naming: z.string().nullable().default(null),
+  attachments: z.array(z.string()).default([]),
+  submission: z.string().nullable().default(null),
+  official_template: z.string().nullable().default(null),
+});
+export const ResearchProof = z.object({
+  url: z.string(),
+  quote: z.string(),
+  title: z.string().default(""),
+});
+export const ResearchCoverage = z.object({
+  past_winners: z.array(ResearchProof).default([]),
+  past_works: z.array(ResearchProof).default([]),
+  judging: z.array(ResearchProof).default([]),
+  missing: z.array(z.string()).default([]),
+});
+export const Brief = z.object({
+  title: z.string(),
+  edition: z.string().nullable().default(null),
+  eligibility: z.string().nullable().default(null),
+  deadline: z.string().nullable().default(null),
+  ai_rules: z.string().nullable().default(null),
+  scoring: z.string().nullable().default(null),
+  deliverables: z.array(Deliverable).default([]),
+  requires_idea: z.boolean().nullable().default(null),
+  missing: z.array(z.string()).default([]),
+  citations: z
+    .array(z.object({ field: z.string(), url: z.string(), quote: z.string() }))
+    .default([]),
+  research: ResearchCoverage.default({
+    past_winners: [],
+    past_works: [],
+    judging: [],
+    missing: [],
+  }),
+});
 export type Brief = z.infer<typeof Brief>;
-export type Evidence = { id: string; competitionId: string; url: string; title: string; text: string; fetchedAt: string; kind: string; purchaseInfo?: {platform: string; price: number; orderId: string; purchasedAt: string} };
-export type ModelRole = 'writer' | 'reviewer';
-export type SearchResult = {url: string; title: string; snippet: string};
-export type SearchOptions = {pages?: number; timeRange?: 'any'|'day'|'week'|'month'|'year'};
-export interface ModelGateway { readonly canSearch?:boolean; reportProgress?(event:JobProgress):Promise<void>; generate(role: ModelRole, prompt: string, agent?: AgentName): Promise<string>; search(query: string, options?: SearchOptions): Promise<SearchResult[]>; investigate?(prompt:string):Promise<{text:string;sessionId:string;events:unknown[]}>; buildProject?(workspace:string,prompt:string):Promise<void>; generateImage?(prompt:string):Promise<{data:Buffer,mime:string}>; inspectImage?(prompt:string,image:{data:Buffer;mime:string},agent?:AgentName):Promise<string>; }
-export type Job = { id: string; competitionId: string; kind: string; state: string; createdAt: string; updatedAt: string; input: Record<string, unknown>; result: Record<string, unknown> | null; error: string | null; calls: number; maxCalls: number };
+export type Evidence = {
+  id: string;
+  competitionId: string;
+  url: string;
+  title: string;
+  text: string;
+  fetchedAt: string;
+  kind: string;
+  purchaseInfo?: {
+    platform: string;
+    price: number;
+    orderId: string;
+    purchasedAt: string;
+  };
+};
+export type ModelRole = "writer" | "reviewer";
+export type SearchResult = { url: string; title: string; snippet: string };
+export type SearchOptions = {
+  pages?: number;
+  timeRange?: "any" | "day" | "week" | "month" | "year";
+};
+export interface ModelGateway {
+  readonly canSearch?: boolean;
+  reportProgress?(event: JobProgress): Promise<void>;
+  generate(role: ModelRole, prompt: string, agent?: AgentName): Promise<string>;
+  search(query: string, options?: SearchOptions): Promise<SearchResult[]>;
+  investigate?(
+    prompt: string,
+  ): Promise<{ text: string; sessionId: string; events: unknown[] }>;
+  buildProject?(workspace: string, prompt: string): Promise<void>;
+  generateImage?(prompt: string): Promise<{ data: Buffer; mime: string }>;
+  inspectImage?(
+    prompt: string,
+    image: { data: Buffer; mime: string },
+    agent?: AgentName,
+  ): Promise<string>;
+}
+export type Job = {
+  id: string;
+  competitionId: string;
+  kind: string;
+  state: string;
+  createdAt: string;
+  updatedAt: string;
+  input: Record<string, unknown>;
+  result: Record<string, unknown> | null;
+  error: string | null;
+  calls: number;
+  maxCalls: number;
+};
