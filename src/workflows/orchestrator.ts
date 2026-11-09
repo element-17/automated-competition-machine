@@ -22,6 +22,7 @@ import { BrowserReport, BrowserSuite, browserAvailability, inspectSoftware, soft
 import { VisualBrief, makeVisual } from '../artifacts/visual.js';
 import { downloadTemplate, readTemplate, saveTemplateFile } from '../artifacts/templates.js';
 import { previewSlides } from '../artifacts/preview.js';
+import { checkLayout } from '../artifacts/layout-check.js';
 
 import { Guard, Idea, budgetError, errorHead, contents, record, cached, type DeliverableResult, type DeliverableStatus } from './shared.js';
 import { createSupportingArtifact } from '../artifacts/supporting.js';
@@ -222,7 +223,7 @@ async function fillTemplate(ctx:Ctx,task:PlanTask,templateRef:string,round:numbe
 /** 制作要求和验收标准里的目标字数（取最大的下限），如”8000–12000字””不少于1.5万字”。没有明确要求时返回 10000 作为合理默认值。 */
 export function targetLength(task:{instructions:string;acceptance:string[]}):number{
   let best=0;for(const m of [task.instructions,...task.acceptance].join(' ').matchAll(/(\d+(?:\.\d+)?)\s*(万)?\s*(?:[-–—~～至到]\s*\d+(?:\.\d+)?\s*万?\s*)?字/g)){const n=Number(m[1])*(m[2]?10000:1);if(n>best)best=n;}
-  return best||10000;
+  return best;
 }
 /** 长文一次生成容易写短、各章深浅不一，超过这个字数就先列大纲再逐章写。 */
 export const longDocumentChars=8000;
@@ -427,8 +428,14 @@ export async function runTask(ctx:Ctx,task:PlanTask):Promise<TaskResult>{
     const failures=[...requirements.filter(c=>c.status==='failed').map(c=>`规则「${c.requirement}」未通过：${c.details.join('；')}`),...(currentBrowser?.status==='failed'?currentBrowser.issues.map(i=>`浏览器实测：${i}`):[])];
     if(attempt.reviewText===null)return done('draft',attempt,null,round+1,[],requirements);
     await announce(ctx,{stage:'review',action:`${task.title}：检查实际文件并评审本轮内容`,taskId:task.id,round:round+1,maxRounds:rounds});
-    const review=failures.length?{pass:false,issues:failures,suggestions:[],needs_input:[]}:checkpoint.review||await verify(ctx,task,attempt);
+    let review=failures.length?{pass:false,issues:failures,suggestions:[],needs_input:[]}:checkpoint.review||await verify(ctx,task,attempt);
     if(!review)return done('draft',attempt,null,round+1,[`${task.title} 评审 Agent 不可用，未经独立验收`],requirements);
+    // 内容评审通过后，再让排版 Agent 看 docx 渲染出的真实页面；版面缺陷作为阻塞问题交回写作 Agent 返工。
+    if(review.pass&&!checkpoint.review&&task.format==='docx'&&attempt.paths[0]){
+      await announce(ctx,{stage:'review',action:`${task.title}：渲染文档并检查版面`,taskId:task.id,round:round+1,maxRounds:rounds});
+      const layout=await checkLayout(ctx.gateway,attempt.paths[0]);
+      if(layout)review={...review,issues:layout.issues,suggestions:[...review.suggestions,...layout.suggestions],pass:layout.issues.length===0};
+    }
     checkpoint.review=review;await atomicWriteJson(checkpointPath,checkpoint);
     if(review.pass)return done('submission',attempt,review,round+1,[],requirements);
     last={attempt,review,requirements};feedback=review.issues.length?review.issues:['评审未通过但未给出具体问题，请对照验收标准全面检查'];

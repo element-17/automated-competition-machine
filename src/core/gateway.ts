@@ -14,7 +14,7 @@ import { assertJobCanRun } from './job-control.js';
 
 /** 解析模型结构化输出；失败时保留模型原文，便于定位模型到底返回了什么。 */
 export function parseJSON(raw:string):unknown {let s=raw.trim();if(s.startsWith('```'))s=s.replace(/^```(?:json)?\s*/i,'').replace(/\s*```$/,'');try{return JSON.parse(s);}catch{const shown=s.length>12000?`${s.slice(0,12000)}\n…（原始返回过长，已截断；完整内容长度 ${s.length} 字符）`:s;throw Error(`模型返回的结构化数据不是有效 JSON；原始内容如下（未被当作事实保存）：\n--- 模型原始返回开始 ---\n${shown}\n--- 模型原始返回结束 ---`);}}
-const agentNames:Record<AgentName,string>={writer:'写作',reviewer:'评审',planner:'调度规划',screener:'搜索结果评估',research:'研究',coder:'编码',image:'图片'};
+const agentNames:Record<AgentName,string>={writer:'写作',reviewer:'评审',planner:'调度规划',screener:'搜索结果评估',research:'研究',coder:'编码',layout:'排版',image:'图片'};
 export type GatewayProgress={agent:AgentName;model:string;provider:string;action:string;raw?:string;stage?:string;taskId?:string;round?:number;maxRounds?:number;elapsedSeconds?:number;budget?:{used:number;limit:number}};
 
 /** 按 Agent 配置的供应商协议调用模型；研究和编码交给所选运行时。 */

@@ -36,7 +36,7 @@ test('缺失原文、格式不匹配和官方模板要求会阻止调用模型',
 test('研究流程保存实际来源、查询与结构化规则',async()=>{
  const {dir,store,cfg}=await setup(); const server=createServer((req,res)=>{res.setHeader('content-type','text/html; charset=utf-8');res.end('<title>测试翻译竞赛</title><h1>2026 翻译竞赛</h1><p>交付一份 txt 译文。</p>');}); await new Promise(r=>server.listen(0,'127.0.0.1',r));
  try{const url=`http://127.0.0.1:${server.address().port}/rules`;const id=store.addCompetition(url,'测试翻译竞赛');const job=store.createJob(id,'research',{},10);const calls=[];const g={search:async()=>[],generate:async(role,prompt)=>{calls.push(role);return prompt.includes('提出最多三个具体的后续搜索词')?(calls.length===1?'["测试翻译竞赛 获奖作品"]':'[]'):prompt.includes('读取来源并只输出一个 JSON 对象')?JSON.stringify(baseBrief):`研究报告\n来源：${url}`;}};
- const result=await runJob(cfg,store,g,job);assert.deepEqual(calls,['writer','writer','writer','writer']);assert.equal(store.competition(id).brief.deliverables[0].type,'translation');assert.equal(store.evidence(id)[0].url,url);assert.equal(store.searches(id).length,4);assert.match(await readFile(result.outputPath,'utf8'),/来源/);
+ const result=await runJob(cfg,store,g,job);assert.deepEqual(calls,['writer','writer','writer','writer']);assert.equal(store.competition(id).brief.deliverables[0].type,'translation');assert.equal(store.evidence(id)[0].url,url);assert.equal(store.searches(id).length,7);assert.match(await readFile(result.outputPath,'utf8'),/来源/);
  }finally{server.close();store.close();await rm(dir,{recursive:true,force:true});}
 });
 
