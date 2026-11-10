@@ -183,7 +183,7 @@ test("OpenAI 兼容协议调用 chat/completions 并带上系统提示词", asyn
       body: JSON.parse(init.body),
     };
     return new Response(
-      JSON.stringify({ choices: [{ message: { content: "兼容输出" } }] }),
+      JSON.stringify({ choices: [{ message: { content: "兼容输出" }, finish_reason: "stop" }] }),
       { status: 200, headers: { "content-type": "application/json" } },
     );
   };
@@ -456,8 +456,8 @@ test("OpenAI 兼容协议使用流式请求并拼接分片，避免中转站长�
     body = JSON.parse(init.body);
     const enc = new TextEncoder();
     const chunks = [
-      'data: {"choices":[{"delta":{"content":"流式"}}]}\n',
-      'data: {"choices":[{"delta":{"content":"输出"}}]}\n\ndata: [DONE]\n',
+      'data: {"choices":[{"delta":{"content":"流式"}}]}\n\n',
+      'data: {"choices":[{"delta":{"content":"输出"}}]}\n\ndata: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\ndata: [DONE]\n',
     ];
     return new Response(
       new ReadableStream({

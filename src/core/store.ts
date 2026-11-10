@@ -454,6 +454,19 @@ export class Store {
       )
       .all(jobId);
   }
+  recentSubmissionArtifacts(jobId: string, limit = 21) {
+    const job = this.job(jobId);
+    return this.db.prepare(
+      `SELECT a.job_id AS jobId,a.path,a.created_at AS createdAt,c.title
+       FROM artifacts a JOIN jobs j ON j.id=a.job_id
+       JOIN competitions c ON c.id=j.competition_id
+       WHERE a.kind='submission' AND j.state='completed'
+         AND j.competition_id<>?
+       GROUP BY a.job_id,a.path
+       ORDER BY MAX(a.created_at) DESC,a.path LIMIT ?`,
+    ).all(job.competitionId, Math.max(1, Math.min(100, Math.floor(limit)))) as
+      { jobId: string; path: string; createdAt: string; title: string }[];
+  }
   enqueue(id: string, redo = false): boolean {
     this.competition(id);
     const existing = this.db

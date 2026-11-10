@@ -11,6 +11,9 @@ import {
   plannedQueries,
   builtinQueries,
   SCREEN_RECORD,
+  screenResults,
+  SCREEN_RECHECK_MS,
+  SCREEN_FAILURE_COOLDOWN_MS,
 } from "../dist/competition/discovery.js";
 import { saveSearchConfig, searchDefaults } from "../dist/core/config.js";
 
@@ -216,7 +219,7 @@ test("搜索结果评估按批调用评审模型，剔除明显无关结果并�
   }
 });
 
-test("评估失败或关闭时保留全部结果", async () => {
+test("评估失败只保留未审核候选，关闭初筛也不代表正式通过", async () => {
   const { dir, store } = await temp();
   try {
     const results = [
@@ -229,11 +232,20 @@ test("评估失败或关闭时保留全部结果", async () => {
         throw Error("第二模型调用失败：网络错误");
       },
     };
-    assert.equal((await discoverCompetitions(store, broken, "比赛")).length, 2);
-    assert.match(
-      store.searches(null).find((x) => x.query === SCREEN_RECORD).error,
-      /全部保留/,
-    );
+    const ids = await discoverCompetitions(store, broken, "比赛");
+    assert.equal(ids.length, 2);
+    const rec = store.searches(null).find((x) => x.query === SCREEN_RECORD);
+    assert.match(rec.error, /未审核候选/);
+    const data = JSON.parse(rec.results);
+    assert.equal(data.checked, 0);
+    assert.equal(data.unreviewed.length, 2);
+    assert.ok(data.decisions.every((d) => d.status === "unreviewed"));
+    for (const id of ids) store.addCandidate(id);
+    assert.ok(store.queue().every((q) => q.state === "candidate" && q.reviewStatus === "unreviewed"));
+    assert.deepEqual(new Set(store.queueReviewCandidates(10).map((q) => q.competitionId)), new Set(ids));
+    store.acquireWorker("discovery-test", 60_000);
+    assert.equal(store.claimQueue("discovery-test", 10), null);
+    store.releaseWorker("discovery-test");
     const { dir: d2, store: s2 } = await temp();
     try {
       let called = 0;
@@ -254,6 +266,139 @@ test("评估失败或关闭时保留全部结果", async () => {
       s2.close();
       await rm(d2, { recursive: true, force: true });
     }
+  } finally {
+    store.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+const lastScreen = (store) => JSON.parse(store.searches(null).filter((r) => r.query === SCREEN_RECORD).at(-1).results);
+const screenItems = (prompt) => JSON.parse(prompt.slice(prompt.lastIndexOf("\n[") + 1));
+
+test("剔除结果同次去重，近期复用不延长有效期，到期重新评估", async (t) => {
+  const { dir, store } = await temp();
+  t.mock.timers.enable({ apis: ["Date"], now: new Date("2026-11-10T00:00:00Z") });
+  try {
+    const item = { url: "https://a.edu.cn/reused", title: "设计大赛通知", snippet: "尚未开放报名" };
+    let calls = 0, keep = false;
+    const g = { search: async () => [item, { ...item, url: `${item.url}#top` }],
+      generate: async (_role, prompt) => {
+        calls++;
+        assert.equal(screenItems(prompt).length, 1);
+        return JSON.stringify([{ i: 0, keep, reason: keep ? "现已开放" : "尚未开始本届征集" }]);
+      } };
+    assert.equal((await discoverCompetitions(store, g, "比赛")).length, 0);
+    const initial = lastScreen(store).decisions[0];
+    assert.match(initial.fingerprint, /^[a-f0-9]{64}$/);
+    assert.equal(initial.recheckReason, "first_seen");
+    t.mock.timers.tick(SCREEN_RECHECK_MS - 1);
+    assert.equal((await discoverCompetitions(store, g, "比赛")).length, 0);
+    assert.equal(calls, 1);
+    assert.equal(lastScreen(store).decisions[0].checkedAt, initial.checkedAt);
+    t.mock.timers.tick(1);
+    keep = true;
+    assert.equal((await discoverCompetitions(store, g, "比赛")).length, 1);
+    assert.equal(calls, 2);
+    assert.equal(lastScreen(store).decisions[0].recheckReason, "expired");
+    assert.equal(lastScreen(store).decisions[0].status, "retained");
+  } finally {
+    store.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("同 URL 标题或摘要变化重评，空白变化与近期相同指纹不重复调用", async () => {
+  const { dir, store } = await temp();
+  try {
+    const item = { url: "https://a.edu.cn/changed", title: "设计大赛 通知", snippet: "旧届征集已结束" };
+    let calls = 0;
+    const g = { generate: async (_role, prompt) => {
+      calls++;
+      return JSON.stringify(screenItems(prompt).map(({ i }) => ({ i, keep: false, reason: "尚非当前有效公告" })));
+    } };
+    await screenResults(store, g, [item, item]);
+    const initial = lastScreen(store).decisions[0].fingerprint;
+    await screenResults(store, g, [{ ...item, title: " 设计大赛  通知 " }]);
+    assert.equal(calls, 1);
+    const changed = { ...item, snippet: "新增本届报名时间" };
+    await screenResults(store, g, [changed]);
+    assert.equal(calls, 2);
+    assert.notEqual(lastScreen(store).decisions[0].fingerprint, initial);
+    assert.equal(lastScreen(store).decisions[0].recheckReason, "content_changed");
+    await screenResults(store, g, [changed]);
+    await screenResults(store, g, [item]);
+    assert.equal(calls, 2, "近期各内容版本均可复用");
+    await screenResults(store, g, [{ ...changed, title: "新一届设计大赛通知" }]);
+    assert.equal(calls, 3);
+  } finally {
+    store.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("旧剔除记录没有时间或指纹时保守重评并取代旧决定", async () => {
+  const { dir, store } = await temp();
+  try {
+    const item = { url: "https://a.edu.cn/legacy", title: "创新比赛通知", snippet: "新一届正在报名" };
+    store.search(null, SCREEN_RECORD, { checked: 1, dropped: [{ url: item.url, reason: "旧信息" }] });
+    let calls = 0;
+    const g = { generate: async () => { calls++; return JSON.stringify([{ i: 0, keep: true, reason: "当前公告" }]); } };
+    assert.equal((await screenResults(store, g, [item])).size, 0);
+    assert.equal(lastScreen(store).decisions[0].recheckReason, "legacy_record");
+    assert.equal((await screenResults(store, g, [item])).size, 0);
+    assert.equal(calls, 1);
+  } finally {
+    store.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("空数组、漏项、重复及越界序号均记为整批未审核，不默认通过", async () => {
+  const { dir, store } = await temp();
+  try {
+    const responses = [[], [{ i: 0, keep: false }],
+      [{ i: 0, keep: false }, { i: 0, keep: true }],
+      [{ i: 0, keep: false }, { i: 2, keep: true }],
+      [{ i: -1, keep: false }, { i: 1, keep: true }]];
+    for (let n = 0; n < responses.length; n++) {
+      const items = [0, 1].map((i) => ({ url: `https://a.edu.cn/invalid-${n}-${i}`, title: "比赛通知", snippet: "" }));
+      const rejected = await screenResults(store, { generate: async () => JSON.stringify(responses[n]) }, items);
+      assert.equal(rejected.size, 0);
+      const rec = lastScreen(store);
+      assert.equal(rec.checked, 0);
+      assert.equal(rec.unreviewed.length, 2);
+      assert.ok(rec.decisions.every((d) => d.status === "unreviewed"));
+    }
+  } finally {
+    store.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("初筛失败冷却后可重试，未调用的后续批次明确标记未审核", async (t) => {
+  const { dir, store } = await temp();
+  t.mock.timers.enable({ apis: ["Date"], now: new Date("2026-11-10T00:00:00Z") });
+  try {
+    const items = Array.from({ length: 3 }, (_, i) => ({ url: `https://a.edu.cn/failure-${i}`, title: "比赛通知", snippet: "" }));
+    let calls = 0, fail = true;
+    const g = { generate: async (_role, prompt) => {
+      calls++;
+      if (fail) throw Error("模型调用失败");
+      return JSON.stringify(screenItems(prompt).map(({ i }) => ({ i, keep: false, reason: "无有效公告" })));
+    } };
+    await screenResults(store, g, items, 2);
+    assert.equal(calls, 1);
+    assert.equal(lastScreen(store).attempted, 2);
+    assert.equal(lastScreen(store).unreviewed.length, 3);
+    assert.match(lastScreen(store).unreviewed[2].reason, /未执行/);
+    await screenResults(store, g, items, 2);
+    assert.equal(calls, 1);
+    assert.equal(lastScreen(store).checked, 0);
+    t.mock.timers.tick(SCREEN_FAILURE_COOLDOWN_MS);
+    fail = false;
+    assert.equal((await screenResults(store, g, items, 2)).size, 3);
+    assert.equal(calls, 3);
+    assert.equal(lastScreen(store).checked, 3);
   } finally {
     store.close();
     await rm(dir, { recursive: true, force: true });

@@ -172,9 +172,10 @@ test("网关记录当前轮次与预算，Codex 事件可供恢复排查", async
     assert.equal(progress.budget.used, 8);
     assert.ok(events.some((e) => e.elapsedSeconds !== undefined));
     assert.match(
-      await readFile(join(dir, ".runtime-events.jsonl"), "utf8"),
+      await readFile(join(dir, "jobs", job, "agent-runtime", Buffer.from(dir).toString("hex").slice(-48), "events.jsonl"), "utf8"),
       /turn.completed/,
     );
+    await assert.rejects(readFile(join(dir, ".runtime-events.jsonl")), { code: "ENOENT" });
   } finally {
     store.close();
     if (previous === undefined) delete process.env.OPENAI_API_KEY;

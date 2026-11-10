@@ -12,6 +12,7 @@ import {
 } from "playwright";
 import { z } from "zod";
 import { atomicWriteJson } from "../workflows/task-receipts.js";
+import { assertArtifactResources } from "./resource-checks.js";
 
 const selector = z
   .string()
@@ -54,7 +55,7 @@ export const BrowserSuite = z.object({
         expect: z.array(Expect).min(1).max(6),
       }),
     )
-    .max(6),
+    .max(12),
 });
 export type BrowserSuite = z.infer<typeof BrowserSuite>;
 const Status = z.enum(["passed", "failed", "unverified"]);
@@ -213,6 +214,7 @@ export async function inspectSoftware(
   try {
     bundle = await artifactFiles(artifactPath);
     report.artifactSha256 = bundle.hash;
+    assertArtifactResources(bundle.files, extname(artifactPath).toLowerCase() === ".html" ? "html" : "zip");
     if (suite) suite = BrowserSuite.parse(suite);
   } catch (e) {
     report.status = "failed";
@@ -226,10 +228,13 @@ export async function inspectSoftware(
   }
   const available = browserAvailability();
   if (!available.available) {
-    report.issues.push(available.reason!);
+    report.status = "failed";
+    report.issues.push(
+      `浏览器不可用，无法验收交互：${available.reason || "未找到可执行文件"}`,
+    );
     report.checks.push({
       id: "browser",
-      status: "unverified",
+      status: "failed",
       details: report.issues,
     });
     return save();
@@ -307,10 +312,11 @@ export async function inspectSoftware(
         ],
       });
     } catch (e) {
+      report.status = "failed";
       report.issues.push(`浏览器无法启动：${message(e).slice(0, 1200)}`);
       report.checks.push({
         id: "browser",
-        status: "unverified",
+        status: "failed",
         details: report.issues,
       });
       return await save();
@@ -472,13 +478,12 @@ export async function inspectSoftware(
       });
       report.issues.push(...issues.map((s) => `${test.name}：${s}`));
     }
-    report.status = report.issues.length
-      ? "failed"
-      : report.cases.length
-        ? "passed"
-        : "unverified";
+    // 没有交互用例或没有截图都不能算通过：页面能打开不能证明功能合格，也不能证明视觉可用。
     if (!report.cases.length)
       report.issues.push("尚无有效的关键操作用例；页面能打开不能证明功能合格");
+    if (!report.screenshots.length)
+      report.issues.push("没有取得任何页面截图，无法确认视觉效果");
+    report.status = report.issues.length ? "failed" : "passed";
   } catch (e) {
     report.status = "failed";
     report.issues.push(

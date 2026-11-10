@@ -57,8 +57,35 @@ export async function makeVisual(
       ),
     );
     if (brief.caption_mode === "overlay") {
-      const svg = `<svg width="${width}" height="${height}" xmlns="http://www.w3.org/2000/svg"><text x="${Math.round(width * brief.caption_x)}" y="${Math.round(height * brief.caption_y)}" fill="#${brief.caption_color}" font-family="${font}" font-size="${size}">${escape(brief.caption)}</text></svg>`;
-      pipeline = pipeline.composite([{ input: Buffer.from(svg) }]);
+      if (size < 1) throw Error("图题字号过小，无法完整渲染；请缩短图题或调整字号");
+      // Render outside the destination canvas first: clipping there would hide missing glyphs.
+      // This generous measurement surface is not the fit decision; only actual alpha pixels are.
+      const padding = Math.max(32, size * 4);
+      const measureWidth = Math.ceil(padding * 2 + Math.max(width, [...brief.caption].length * size * 4));
+      const measureHeight = padding * 2;
+      if (measureWidth * measureHeight > 32_000_000)
+        throw Error("图题测量画布过大，无法完整核验；请缩短图题或调整字号");
+      const svg = `<svg width="${measureWidth}" height="${measureHeight}" xmlns="http://www.w3.org/2000/svg"><text x="${padding}" y="${padding}" fill="#${brief.caption_color}" font-family="${font}" font-size="${size}">${escape(brief.caption)}</text></svg>`;
+      const { data, info: rendered } = await sharp(Buffer.from(svg)).ensureAlpha().raw().toBuffer({ resolveWithObject: true });
+      let left = rendered.width, top = rendered.height, right = -1, bottom = -1;
+      for (let y = 0; y < rendered.height; y++)
+        for (let x = 0; x < rendered.width; x++)
+          if (data[(y * rendered.width + x) * rendered.channels + rendered.channels - 1]) {
+            left = Math.min(left, x); top = Math.min(top, y);
+            right = Math.max(right, x); bottom = Math.max(bottom, y);
+          }
+      if (right < left || bottom < top)
+        throw Error("图题没有渲染出可见像素，无法完整核验；请调整图题或字体配置");
+      if (left === 0 || top === 0 || right === rendered.width - 1 || bottom === rendered.height - 1)
+        throw Error("图题超出测量画布，无法完整核验；请缩短图题或调整字号");
+      const targetLeft = Math.round(width * brief.caption_x) + left - padding;
+      const targetTop = Math.round(height * brief.caption_y) + top - padding;
+      const captionWidth = right - left + 1, captionHeight = bottom - top + 1;
+      if (targetLeft < 0 || targetTop < 0 || targetLeft + captionWidth > width || targetTop + captionHeight > height)
+        throw Error("图题实际渲染边界超出画面；请调整 caption_x、caption_y、caption_size 或缩短图题");
+      const caption = await sharp(data, { raw: rendered })
+        .extract({ left, top, width: captionWidth, height: captionHeight }).png().toBuffer();
+      pipeline = pipeline.composite([{ input: caption, left: targetLeft, top: targetTop }]);
     } else {
       const band = Math.round(size * 2.2);
       const svg = `<svg width="${width}" height="${band}" xmlns="http://www.w3.org/2000/svg"><rect width="${width}" height="${band}" fill="#${brief.band_color}"/><text x="${Math.round(width / 2)}" y="${Math.round(band / 2)}" fill="#${brief.caption_color}" font-family="${font}" font-size="${size}" text-anchor="middle" dominant-baseline="central">${escape(brief.caption)}</text></svg>`;

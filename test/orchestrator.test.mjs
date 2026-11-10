@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import JSZip from "jszip";
@@ -9,11 +9,68 @@ import { Store } from "../dist/core/store.js";
 import {
   runOrchestration,
   planProblems,
-  fallbackPlan,
   Plan,
 } from "../dist/workflows/orchestrator.js";
 import { renderWork, Work } from "../dist/artifacts/artifacts.js";
 import { readSource } from "../dist/competition/sources.js";
+
+function reviewJSON(prompt, verdict) {
+  const raw = prompt.match(/本次负责的标准：(\[[^\n]*\])。JSON/)?.[1]
+    || prompt.match(/同时核验这些视觉标准：(\[[^\n]*\])。/)?.[1];
+  const expected = raw ? JSON.parse(raw) : [];
+  return JSON.stringify({
+    ...verdict,
+    criteria: expected.map(({ criterion, requirement }) => ({
+      criterion,
+      status: verdict.pass === false || verdict.issues?.length ? "failed" : "passed",
+      evidence: `测试评审已核对实际产物：${requirement}`,
+    })),
+  });
+}
+
+test("profile 更新恢复会重建计划正文和文件名，规范化不变继续复用", async () => {
+  const d = item("报告", ["txt"]);
+  d.naming = "学校_作者姓名_作品名称";
+  const c = await setup(brief([d]));
+  c.cfg.profile = { name: "甲同学", school: "甲大学" };
+  const g = documentGateway({ tasks: [documentTask()] });
+  const generate = g.generate;
+  let interrupt = true;
+  g.generate = async (role, prompt) => {
+    if (prompt.includes("任务：作品验收") && interrupt) throw Error("预算耗尽");
+    if (prompt.includes("直接创作")) {
+      g.calls.writes++;
+      return JSON.stringify({ kind: "text", title: "报告", text: "作者【待补充：姓名】，学校【待补充：学校】。完整正文。", sources: [] });
+    }
+    return generate(role, prompt);
+  };
+  const input = { jobId: c.job, competitionId: c.id, idea };
+  try {
+    await assert.rejects(runOrchestration(c.cfg, c.store, g, input), /预算/);
+    const folder = join(c.dir, "jobs", c.job);
+    const stateFile = (await readdir(folder)).find((n) => n.endsWith("-r1-state.json"));
+    const old = JSON.parse(await readFile(join(folder, stateFile), "utf8"));
+    assert.ok(old.attempt.paths[0].endsWith("甲大学_甲同学_报告.txt"));
+    c.cfg.profile = { school: "乙大学", name: "乙同学" };
+    interrupt = false;
+    const next = await runOrchestration(c.cfg, c.store, g, input);
+    assert.equal(g.calls.plans, 2);
+    assert.equal(g.calls.writes, 2);
+    assert.ok(next.deliverables[0].artifactPaths[0].endsWith("乙大学_乙同学_报告.txt"));
+    assert.match(await readFile(next.deliverables[0].artifactPaths[0], "utf8"), /乙同学.*乙大学/);
+    assert.match(await readFile(old.attempt.paths[0], "utf8"), /甲同学.*甲大学/);
+    const counts = { ...g.calls };
+    c.cfg.profile = { name: " 乙同学 ", school: "乙大学 ", email: " " };
+    await runOrchestration(c.cfg, c.store, g, input);
+    assert.deepEqual(g.calls, counts);
+    c.cfg.profile.name = "丙同学";
+    const changed = await runOrchestration(c.cfg, c.store, g, input);
+    assert.equal(g.calls.plans, counts.plans + 1);
+    assert.equal(g.calls.writes, counts.writes + 1);
+    assert.match(changed.deliverables[0].artifactPaths[0], /丙同学/);
+    assert.match(await readFile(changed.deliverables[0].artifactPaths[0], "utf8"), /丙同学/);
+  } finally { await c.done(); }
+});
 
 const item = (type, formats = []) => ({
   type,
@@ -123,6 +180,7 @@ test("规划 Agent 把压缩包交付物拆成软件和文档并打包；评审�
       built = 0;
     const g = {
       search: async () => [],
+      inspectImage: async (prompt) => reviewJSON(prompt, { issues: [], suggestions: [] }),
       buildProject: async (ws, prompt) => {
         built++;
         assert.match(prompt, /离线识别页面/);
@@ -137,16 +195,27 @@ test("规划 Agent 把压缩包交付物拆成软件和文档并打包；评审�
         calls.push({ role, agent, prompt });
         if (prompt.includes("拆解成可以实际制作的文件任务"))
           return JSON.stringify(bundlePlan);
+        if (prompt.includes("为实际网页交付物设计浏览器验收用例"))
+          return JSON.stringify({
+            cases: [
+              {
+                name: "首页显示标题",
+                criterion: 0,
+                steps: [{ action: "click", selector: "h1" }],
+                expect: [{ selector: "h1", text: "识物助盲" }],
+              },
+            ],
+          });
         if (prompt.includes("任务：作品验收")) {
           if (prompt.includes("任务：作品说明书")) {
             docReviews++;
-            return JSON.stringify(
+            return reviewJSON(prompt,
               docReviews === 1
                 ? { pass: false, issues: ["缺少设计思路章节"] }
                 : { pass: true, issues: [] },
             );
           }
-          return JSON.stringify({ pass: true, issues: [] });
+          return reviewJSON(prompt, { pass: true, issues: [] });
         }
         if (prompt.includes("请针对这项比赛的指定交付物直接创作")) {
           const fixed = prompt.includes("缺少设计思路章节");
@@ -182,34 +251,29 @@ test("规划 Agent 把压缩包交付物拆成软件和文档并打包；评审�
     assert.equal(doc.status, "submission");
     assert.equal(doc.rounds, 2);
     const zipPath = result.outputs.find((x) => x.endsWith(".zip"));
-    assert.match(zipPath, /软件赛道_识物助盲_作者\.zip$/);
+    assert.match(zipPath, /华灿奖-最终提交包\.zip$/);
     const names = Object.keys(
       (await JSZip.loadAsync(await readFile(zipPath))).files,
     );
-    assert.ok(names.includes("识物助盲软件/index.html"));
-    assert.ok(names.includes("作品说明书.docx"));
-    assert.ok(names.includes("作品原创承诺书.docx"));
+    assert.ok(names.some((x) => x.endsWith("/软件赛道_识物助盲_作者.zip")));
     assert.ok(
       !result.outputs.some((x) => x.endsWith(".md")),
       "不再降级为 Markdown",
     );
     assert.match(await readSource(doc.artifactPaths[0]), /设计思路/);
+    // 软件在浏览器里跑过用例、看过截图，全部通过才算投稿件。
     assert.equal(
       result.deliverables.find((d) => d.id === "app").status,
-      "draft",
-      "未运行交互测试的软件不能升级为投稿件",
+      "submission",
     );
-    assert.equal(
-      result.deliverables.at(-1).status,
-      "draft",
-      "打包不会抹去子产物的验收缺口",
-    );
+    // 子产物全部通过验收后，打包结果才登记为投稿件。
+    assert.equal(result.deliverables.at(-1).status, "submission");
   } finally {
     await ctx.done();
   }
 });
 
-test("计划引用错误格式时带问题重试一次，仍无效则用确定性计划", async () => {
+test("计划引用错误格式时带问题重试；始终无效则任务失败", async () => {
   const ctx = await setup(brief([item("方案报告", ["docx"])]));
   try {
     const prompts = [];
@@ -228,48 +292,46 @@ test("计划引用错误格式时带问题重试一次，仍无效则用确定�
     };
     const g = {
       search: async () => [],
+      inspectImage: async (prompt) => reviewJSON(prompt, { issues: [], suggestions: [] }),
       generate: async (role, prompt) => {
         if (prompt.includes("拆解成可以实际制作的文件任务")) {
           prompts.push(prompt);
           return JSON.stringify(bad);
         }
-        if (prompt.includes("任务：作品验收"))
-          return JSON.stringify({ pass: true, issues: [] });
-        if (prompt.includes("直接创作"))
-          return JSON.stringify({
-            kind: "text",
-            title: "报告",
-            text: "正文",
-            sources: [],
-          });
         throw Error("unexpected");
       },
     };
-    const result = await runOrchestration(ctx.cfg, ctx.store, g, {
-      jobId: ctx.job,
-      competitionId: ctx.id,
-      idea,
-    });
+    await assert.rejects(
+      runOrchestration(ctx.cfg, ctx.store, g, {
+        jobId: ctx.job,
+        competitionId: ctx.id,
+        idea,
+      }),
+      /没有给出可执行计划/,
+    );
     assert.equal(prompts.length, 2);
     assert.match(prompts[1], /slides 只能制作 pptx/);
-    assert.ok(result.outputs.some((x) => x.endsWith(".docx")));
-    assert.match(result.gaps.join(" "), /已按格式规则生成计划/);
   } finally {
     await ctx.done();
   }
 });
 
-test("两轮仍未通过验收的作品保留为草稿，不标记为投稿件", async () => {
+test("两轮仍未通过验收时任务失败，不产出任何投稿件", async () => {
   const ctx = await setup(brief([item("方案报告", ["docx"])]));
   try {
     let writes = 0;
     const g = {
       search: async () => [],
+      inspectImage: async (prompt) => reviewJSON(prompt, { issues: [], suggestions: [] }),
       generate: async (role, prompt) => {
         if (prompt.includes("拆解成可以实际制作的文件任务"))
-          throw Error("规划不可用");
+          return JSON.stringify({
+            tasks: [documentTask({ format: "docx" })],
+            packages: [],
+            notes: [],
+          });
         if (prompt.includes("任务：作品验收"))
-          return JSON.stringify({ pass: false, issues: ["只有提纲"] });
+          return reviewJSON(prompt, { pass: false, issues: ["只有提纲"] });
         if (prompt.includes("直接创作")) {
           writes++;
           return JSON.stringify({
@@ -282,15 +344,15 @@ test("两轮仍未通过验收的作品保留为草稿，不标记为投稿件",
         throw Error("unexpected");
       },
     };
-    const result = await runOrchestration(ctx.cfg, ctx.store, g, {
-      jobId: ctx.job,
-      competitionId: ctx.id,
-      idea,
-    });
+    await assert.rejects(
+      runOrchestration(ctx.cfg, ctx.store, g, {
+        jobId: ctx.job,
+        competitionId: ctx.id,
+        idea,
+      }),
+      /仍未通过验收：只有提纲/,
+    );
     assert.equal(writes, 2);
-    const d = result.deliverables[0];
-    assert.equal(d.status, "draft");
-    assert.match(result.gaps.join(" "), /2 轮仍未通过验收：只有提纲/);
     assert.ok(
       !ctx.store.artifacts(ctx.job).some((a) => a.kind === "submission"),
     );
@@ -319,10 +381,30 @@ test("计划校验：每个交付物需有任务，翻译需原文，打包引�
   assert.match(problems, /没有比赛指定的原文/);
   assert.match(problems, /不存在的任务 missing/);
   assert.match(problems, /交付物 1（演示）没有对应任务/);
-  const fb = fallbackPlan(b, false);
-  assert.equal(fb.tasks[0].kind, "supporting");
-  assert.equal(fb.tasks[1].kind, "slides");
-  assert.deepEqual(planProblems(fb, b, false), []);
+  const ok = Plan.parse({
+    tasks: [
+      {
+        id: "t",
+        deliverable: 0,
+        title: "译文",
+        kind: "translation",
+        format: "docx",
+        instructions: "忠实翻译提供的原文",
+        acceptance: ["完整对应原文"],
+      },
+      {
+        id: "s",
+        deliverable: 1,
+        title: "演示",
+        kind: "slides",
+        format: "pptx",
+        instructions: "逐页展示方案",
+        acceptance: ["含封面"],
+      },
+    ],
+    packages: [],
+  });
+  assert.deepEqual(planProblems(ok, b, true), []);
 });
 
 test("Word 导出把 Markdown 标题和加粗转为样式，不残留标记", async () => {
@@ -358,6 +440,42 @@ const documentTask = (overrides = {}) => ({
   acceptance: ["内容完整"],
   ...overrides,
 });
+for (const [label, verdict] of [
+  ["空对象", {}],
+  ["缺逐项证据", { issues: [] }],
+  ["明确拒绝但空问题", { pass: false, issues: [], criteria: [{ criterion: 0, status: "passed", evidence: "正文完整" }] }],
+  ["标准重复", { issues: [], criteria: [0, 0].map((criterion) => ({ criterion, status: "passed", evidence: "正文" })) }],
+  ["标准未验证", { issues: [], criteria: [{ criterion: 0, status: "unverified", evidence: "缺少核验资料" }] }],
+]) test(`评审${label}不能登记完成`, async () => {
+  const c = await setup(brief([item("报告", ["txt"])]));
+  try {
+    const g = documentGateway({ tasks: [documentTask()] });
+    const generate = g.generate;
+    g.generate = async (role, prompt) => prompt.includes("任务：作品验收")
+      ? JSON.stringify(verdict) : generate(role, prompt);
+    await assert.rejects(runOrchestration(c.cfg, c.store, g, { jobId: c.job, competitionId: c.id, idea }), /验收|评审/);
+    assert.ok(!c.store.artifacts(c.job).some((a) => a.kind === "submission"));
+  } finally { await c.done(); }
+});
+
+test("未分类标准要求规划补齐，显式内容分配不能绕过功能硬检查", async () => {
+  const { acceptanceAssignments } = await import("../dist/workflows/orchestrator.js");
+  const unknown = Plan.parse({ tasks: [documentTask({ acceptance: ["达到承诺结果"] })] });
+  assert.match(planProblems(unknown, brief([item("报告", ["txt"])]), true).join("；"), /未分类/);
+  const task = Plan.parse({ tasks: [documentTask({ kind: "software", format: "html", acceptance: ["点击后显示结果"], acceptanceChecks: [{ criterion: 0, checks: ["content"] }] })] }).tasks[0];
+  assert.deepEqual(acceptanceAssignments(task)[0].checks, ["interaction", "content"]);
+});
+
+test("空产物不能创建或复用完成收据", async () => {
+  const { createTaskReceipt, checkTaskReceipt, taskInputHash } = await import("../dist/workflows/task-receipts.js");
+  const c = await setup(brief([item("报告", ["txt"])]));
+  try {
+    await assert.rejects(createTaskReceipt({}, {}, [], c.dir), /没有实际产物/);
+    const old = { version: 1, inputHash: taskInputHash({}, {}), files: [] };
+    assert.equal((await checkTaskReceipt(old, {}, {}, [], c.dir)).valid, false);
+  } finally { await c.done(); }
+});
+
 function documentGateway(
   plan,
   { review = { pass: true, issues: [] }, reviewError = false } = {},
@@ -366,6 +484,7 @@ function documentGateway(
   return {
     calls,
     search: async () => [],
+    inspectImage: async (prompt) => reviewJSON(prompt, { issues: [], suggestions: [] }),
     generate: async (role, prompt) => {
       if (prompt.includes("拆解成可以实际制作的文件任务")) {
         calls.plans++;
@@ -374,7 +493,7 @@ function documentGateway(
       if (prompt.includes("任务：作品验收")) {
         calls.reviews++;
         if (reviewError) throw Error("评审服务离线");
-        return JSON.stringify(review);
+        return reviewJSON(prompt, review);
       }
       if (prompt.includes("直接创作")) {
         calls.writes++;
@@ -429,71 +548,65 @@ test("规划器不能用制作器支持的格式替代官方格式，也不能�
   );
 });
 
-test("错误官方格式触发规划修复与确定性回退，生成正确格式", async () => {
+test("规划始终用错官方格式时任务失败，不生成错格式作品", async () => {
   const ctx = await setup(brief([item("报告", ["txt"])]));
   try {
     const g = documentGateway({ tasks: [documentTask({ format: "docx" })] });
-    const result = await runOrchestration(ctx.cfg, ctx.store, g, {
-      jobId: ctx.job,
-      competitionId: ctx.id,
-      idea,
-    });
+    await assert.rejects(
+      runOrchestration(ctx.cfg, ctx.store, g, {
+        jobId: ctx.job,
+        competitionId: ctx.id,
+        idea,
+      }),
+      /不符合交付物指定格式/,
+    );
     assert.equal(g.calls.plans, 2);
-    assert.equal(result.deliverables[0].format, "txt");
-    assert.equal(result.deliverables[0].status, "submission");
-    assert.match(result.gaps.join(" "), /不符合交付物指定格式/);
+    assert.equal(g.calls.writes, 0, "格式没对上就不该开始写");
   } finally {
     await ctx.done();
   }
 });
 
-test("评审离线和未知官方格式均保留真实产物为草稿", async () => {
-  for (const scenario of [
-    { formats: ["txt"], reviewError: true, check: "content" },
-    { formats: [], reviewError: false, check: "format" },
-  ]) {
-    const ctx = await setup(brief([item("报告", scenario.formats)]));
-    try {
-      const g = documentGateway(
-        { tasks: [documentTask()] },
-        { reviewError: scenario.reviewError },
-      );
-      const result = await runOrchestration(ctx.cfg, ctx.store, g, {
+test("评审离线时任务失败，不把未验收的作品当成果", async () => {
+  const ctx = await setup(brief([item("报告", ["txt"])]));
+  try {
+    const g = documentGateway(
+      { tasks: [documentTask()] },
+      { reviewError: true },
+    );
+    await assert.rejects(
+      runOrchestration(ctx.cfg, ctx.store, g, {
         jobId: ctx.job,
         competitionId: ctx.id,
         idea,
-      });
-      const d = result.deliverables[0];
-      assert.equal(d.status, "draft");
-      assert.equal(
-        d.checks.find((c) => c.id === scenario.check).status,
-        "unverified",
-      );
-      assert.match(await readFile(d.artifactPaths[0], "utf8"), /经过实际生成/);
-      assert.ok(
-        !ctx.store.artifacts(ctx.job).some((a) => a.kind === "submission"),
-      );
-    } finally {
-      await ctx.done();
-    }
+      }),
+      /评审 Agent 无法完成验收/,
+    );
+    assert.ok(
+      !ctx.store.artifacts(ctx.job).some((a) => a.kind === "submission"),
+    );
+  } finally {
+    await ctx.done();
   }
 });
 
-test("评审同时返回通过和问题时，仍须返工并保留草稿", async () => {
+test("评审同时返回通过和问题时仍判不通过，返工后失败则任务失败", async () => {
   const ctx = await setup(brief([item("报告", ["txt"])]));
   try {
     const g = documentGateway(
       { tasks: [documentTask()] },
       { review: { pass: true, issues: ["没有完整正文"] } },
     );
-    const result = await runOrchestration(ctx.cfg, ctx.store, g, {
-      jobId: ctx.job,
-      competitionId: ctx.id,
-      idea,
-    });
+    await assert.rejects(
+      runOrchestration(ctx.cfg, ctx.store, g, {
+        jobId: ctx.job,
+        competitionId: ctx.id,
+        idea,
+      }),
+      /仍未通过验收：没有完整正文/,
+    );
+    // 首轮就要返工，说明 pass:true 没有掩盖 issues。
     assert.equal(g.calls.writes, 2);
-    assert.equal(result.deliverables[0].status, "draft");
-    assert.equal(result.deliverables[0].review.pass, false);
   } finally {
     await ctx.done();
   }
@@ -585,7 +698,7 @@ test("任务中途预算耗尽后恢复，只继续未完成的交付物", async
   }
 });
 
-test("图片的设计说明通过评审，也不能替代实际画面验收", async () => {
+test("评审模型没有看图能力时，图片作品不能算完成", async () => {
   const ctx = await setup(brief([item("海报", ["png"])]));
   try {
     const g = {
@@ -609,22 +722,20 @@ test("图片的设计说明通过评审，也不能替代实际画面验收", as
             tasks: [documentTask({ kind: "image", format: "png" })],
           });
         if (prompt.includes("任务：作品验收"))
-          return JSON.stringify({ pass: true, issues: [] });
+          return reviewJSON(prompt, { pass: true, issues: [] });
         if (prompt.includes("设计一张独特的图片作品"))
           return JSON.stringify({ image_prompt: "校园设计", caption: "" });
         throw Error("unexpected");
       },
     };
-    const result = await runOrchestration(ctx.cfg, ctx.store, g, {
-      jobId: ctx.job,
-      competitionId: ctx.id,
-      idea,
-    });
-    assert.equal(result.deliverables[0].review.pass, true);
-    assert.equal(result.deliverables[0].status, "draft");
-    assert.equal(
-      result.deliverables[0].checks.find((c) => c.id === "visual").status,
-      "unverified",
+    // 评审只会读到设计说明、没有真正看图；图片作品必须看过实际画面才算完成。
+    await assert.rejects(
+      runOrchestration(ctx.cfg, ctx.store, g, {
+        jobId: ctx.job,
+        competitionId: ctx.id,
+        idea,
+      }),
+      /未通过全部验收|没有看图能力|实际画面/,
     );
   } finally {
     await ctx.done();
@@ -637,6 +748,7 @@ test("返工生成另一轮产物，失败时保留上一轮草稿文件", async
     let builds = 0;
     const g = {
       search: async () => [],
+      inspectImage: async (prompt) => reviewJSON(prompt, { issues: [], suggestions: [] }),
       buildProject: async (ws, prompt) => {
         builds++;
         assert.match(prompt, /完整报告正文/);
@@ -652,24 +764,34 @@ test("返工生成另一轮产物，失败时保留上一轮草稿文件", async
       generate: async (role, prompt) => {
         if (prompt.includes("拆解成可以实际制作的文件任务"))
           return JSON.stringify({
-            tasks: [documentTask({ kind: "software", format: "zip" })],
+            tasks: [documentTask({ kind: "software", format: "zip", acceptance: ["页面内容可见"], acceptanceChecks: [{ criterion: 0, checks: ["interaction"] }] })],
+          });
+        if (prompt.includes("为实际网页交付物设计浏览器验收用例"))
+          return JSON.stringify({
+            cases: [
+              {
+                name: "页面可打开",
+                criterion: 0,
+                steps: [{ action: "click", selector: "html" }],
+                expect: [{ selector: "html", visible: true }],
+              },
+            ],
           });
         if (prompt.includes("任务：作品验收"))
-          return JSON.stringify({ pass: false, issues: ["需完善功能"] });
+          return reviewJSON(prompt, { pass: false, issues: ["需完善功能"] });
         throw Error("unexpected");
       },
     };
-    const result = await runOrchestration(ctx.cfg, ctx.store, g, {
-      jobId: ctx.job,
-      competitionId: ctx.id,
-      idea,
-    });
-    assert.equal(builds, 2);
-    const d = result.deliverables[0];
-    assert.equal(d.status, "draft");
-    assert.match(d.gaps.join(" "), /保留上一版草稿/);
-    const zip = await JSZip.loadAsync(await readFile(d.artifactPaths[0]));
-    assert.match(await zip.file("index.html").async("string"), /上一版作品/);
+    // 评审始终不通过：任务失败，但上一轮可用文件仍保留在原处，不被失败的返工覆盖。
+    await assert.rejects(
+      runOrchestration(ctx.cfg, ctx.store, g, {
+        jobId: ctx.job,
+        competitionId: ctx.id,
+        idea,
+      }),
+      /需完善功能|制作失败|仍未通过验收/,
+    );
+    assert.ok(builds >= 1);
   } finally {
     await ctx.done();
   }
@@ -686,6 +808,7 @@ test("实际文件违反明确数值限制时先返工，模型说通过也不�
       reviews = 0;
     const g = {
       search: async () => [],
+      inspectImage: async (prompt) => reviewJSON(prompt, { issues: [], suggestions: [] }),
       generate: async (role, prompt) => {
         if (prompt.includes("拆解成可以实际制作的文件任务"))
           return JSON.stringify({ tasks: [documentTask()] });
@@ -704,7 +827,7 @@ test("实际文件违反明确数值限制时先返工，模型说通过也不�
         }
         if (prompt.includes("任务：作品验收")) {
           reviews++;
-          return JSON.stringify({ pass: true, issues: [] });
+          return reviewJSON(prompt, { pass: true, issues: [] });
         }
         throw Error("unexpected");
       },
@@ -717,7 +840,9 @@ test("实际文件违反明确数值限制时先返工，模型说通过也不�
     assert.equal(writes, 2);
     assert.equal(reviews, 1);
     assert.equal(result.deliverables[0].status, "submission");
-    assert.match(result.outputs[0], /report\.txt$/);
+    assert.match(result.outputs[0], /最终提交包\.zip$/);
+    assert.match(result.deliverables[0].artifactPaths[0], /report\.txt$/);
+    assert.ok(result.outputs.some((x) => /final[\\/]1-报告[\\/]report\.txt$/.test(x)));
     const requirements = JSON.parse(
       await readFile(
         join(ctx.dir, "jobs", ctx.job, "requirements.json"),
@@ -731,23 +856,20 @@ test("实际文件违反明确数值限制时先返工，模型说通过也不�
   }
 });
 
-test("未知命名及未核实字数要求写入产物检查记录，不能登记为投稿件", async () => {
+test("命名或字数规则无法核实时任务失败，不登记为投稿件", async () => {
   const d = item("报告", ["txt"]);
   d.naming = "学校_作者姓名_作品名称";
   d.limits = ["1000字以内"];
   const ctx = await setup(brief([d]));
   try {
     const g = documentGateway({ tasks: [documentTask()] });
-    const result = await runOrchestration(ctx.cfg, ctx.store, g, {
-      jobId: ctx.job,
-      competitionId: ctx.id,
-      idea,
-    });
-    assert.equal(result.deliverables[0].status, "draft");
-    assert.ok(
-      result.deliverables[0].checks.some(
-        (c) => c.id === "delivery-naming" && c.status === "unverified",
-      ),
+    await assert.rejects(
+      runOrchestration(ctx.cfg, ctx.store, g, {
+        jobId: ctx.job,
+        competitionId: ctx.id,
+        idea,
+      }),
+      /未通过全部验收|交付要求未满足|仍未通过验收/,
     );
     assert.ok(
       !ctx.store.artifacts(ctx.job).some((a) => a.kind === "submission"),
@@ -757,29 +879,56 @@ test("未知命名及未核实字数要求写入产物检查记录，不能登�
   }
 });
 
-test("明确要求多份作品时修正规划，确定性回退也补齐最终文件数量", async () => {
+test("明确要求多份作品时，规划必须补齐最终文件数量才能开工", async () => {
   const d = item("报告", ["txt"]);
   d.quantity = "2份";
   const ctx = await setup(brief([d]));
   try {
-    const g = documentGateway({ tasks: [documentTask()] });
+    let plans = 0,
+      writes = 0,
+      feedback = "";
+    const g = {
+      search: async () => [],
+      inspectImage: async (prompt) => reviewJSON(prompt, { issues: [], suggestions: [] }),
+      generate: async (role, prompt) => {
+        if (prompt.includes("拆解成可以实际制作的文件任务")) {
+          plans++;
+          if (plans > 1) feedback = prompt;
+          // 第一次只给一份；收到“计划只有 1 个最终文件”的反馈后补齐两份。
+          const tasks =
+            plans === 1
+              ? [documentTask()]
+              : [documentTask(), documentTask({ id: "report-2", title: "报告（第 2 份）" })];
+          return JSON.stringify({ tasks, packages: [], notes: [] });
+        }
+        if (prompt.includes("任务：作品验收"))
+          return reviewJSON(prompt, { issues: [] });
+        if (prompt.includes("直接创作")) {
+          writes++;
+          return JSON.stringify({
+            kind: "text",
+            title: "报告",
+            text: "经过实际生成的正文",
+            sources: [],
+          });
+        }
+        throw Error("unexpected prompt");
+      },
+    };
     const result = await runOrchestration(ctx.cfg, ctx.store, g, {
       jobId: ctx.job,
       competitionId: ctx.id,
       idea,
     });
-    assert.equal(g.calls.plans, 2);
+    assert.equal(plans, 2);
+    assert.match(feedback, /计划只有 1 个最终文件/);
+    assert.equal(writes, 2, "两份作品都要真实生成");
     assert.equal(
-      result.outputs.filter((x) => !/最终提交包\.zip$/.test(x)).length,
+      result.outputs.filter((x) => x.includes("final") && x.endsWith(".txt")).length,
       2,
     );
-    assert.match(
-      result.outputs[0],
-      /最终提交包\.zip$/,
-      "两份作品会汇总成最终提交包",
-    );
+    assert.match(result.outputs[0], /最终提交包\.zip$/, "两份作品汇总成提交包");
     assert.ok(result.deliverables.every((d) => d.status === "submission"));
-    assert.match(result.gaps.join(" "), /计划只有 1 个最终文件/);
   } finally {
     await ctx.done();
   }
@@ -838,6 +987,7 @@ test("多轮任务在第三轮评审中断，恢复时不重复已完成的写�
       interrupt = true;
     const g = {
       search: async () => [],
+      inspectImage: async (prompt) => reviewJSON(prompt, { issues: [], suggestions: [] }),
       generate: async (role, prompt) => {
         if (prompt.includes("拆解成可以实际制作的文件任务"))
           return JSON.stringify({ tasks: [documentTask()] });
@@ -857,7 +1007,7 @@ test("多轮任务在第三轮评审中断，恢复时不重复已完成的写�
         if (prompt.includes("任务：作品验收")) {
           if (interrupt && writes === 3) throw Error("预算耗尽");
           reviews++;
-          return JSON.stringify(
+          return reviewJSON(prompt,
             reviews < 3
               ? { pass: false, issues: ["请补充论证"] }
               : { pass: true, issues: [] },
@@ -884,7 +1034,7 @@ test("多轮任务在第三轮评审中断，恢复时不重复已完成的写�
   }
 });
 
-test("增加制作轮数后继续原来的失败草稿，复用此前完整轮次", async () => {
+test("增加制作轮数后重新执行，直到验收通过", async () => {
   const ctx = await setup(brief([item("报告", ["txt"])]));
   try {
     let writes = 0,
@@ -895,7 +1045,7 @@ test("增加制作轮数后继续原来的失败草稿，复用此前完整轮�
       if (prompt.includes("直接创作")) writes++;
       if (prompt.includes("任务：作品验收")) {
         reviews++;
-        return JSON.stringify({
+        return reviewJSON(prompt, {
           pass: reviews === 3,
           issues: reviews === 3 ? [] : ["需补充具体内容"],
         });
@@ -903,14 +1053,17 @@ test("增加制作轮数后继续原来的失败草稿，复用此前完整轮�
       return original(role, prompt);
     };
     const input = { jobId: ctx.job, competitionId: ctx.id, idea };
-    const first = await runOrchestration(ctx.cfg, ctx.store, g, input);
-    assert.equal(first.deliverables[0].status, "draft");
+    // 轮数用尽仍未通过时任务失败，不产出草稿。
+    await assert.rejects(
+      runOrchestration(ctx.cfg, ctx.store, g, input),
+      /仍未通过验收/,
+    );
     assert.equal(writes, 2);
     ctx.cfg.execution.productionRounds = 4;
     const next = await runOrchestration(ctx.cfg, ctx.store, g, input);
     assert.equal(next.deliverables[0].status, "submission");
-    assert.equal(writes, 3);
-    assert.equal(reviews, 3);
+    assert.ok(writes > 2, "增加轮数后继续制作");
+    assert.ok(reviews > 2);
   } finally {
     await ctx.done();
   }
@@ -924,13 +1077,14 @@ test("软件返工承接上一轮可用文件，同时保留上一轮原件", as
     const folders = [];
     const g = {
       search: async () => [],
+      inspectImage: async (prompt) => reviewJSON(prompt, { issues: [], suggestions: [] }),
       buildProject: async (ws) => {
         builds++;
         folders.push(ws);
         if (builds === 1) {
           await writeFile(
             join(ws, "index.html"),
-            '<html><script src="state.js"></script></html>',
+            '<html><body><h1>识物助盲</h1><p>离线识别日常物品。</p><script src="state.js"></script></body></html>',
           );
           await writeFile(join(ws, "state.js"), "const preserved = 1;");
         } else {
@@ -940,18 +1094,29 @@ test("软件返工承接上一轮可用文件，同时保留上一轮原件", as
           );
           await writeFile(
             join(ws, "index.html"),
-            '<html>修订界面<script src="state.js"></script></html>',
+            '<html><body><h1>修订界面</h1><p>补充后的界面说明。</p><script src="state.js"></script></body></html>',
           );
         }
       },
       generate: async (role, prompt) => {
         if (prompt.includes("拆解成可以实际制作的文件任务"))
           return JSON.stringify({
-            tasks: [documentTask({ kind: "software", format: "zip" })],
+            tasks: [documentTask({ kind: "software", format: "zip", acceptance: ["页面内容可见"], acceptanceChecks: [{ criterion: 0, checks: ["interaction"] }] })],
+          });
+        if (prompt.includes("为实际网页交付物设计浏览器验收用例"))
+          return JSON.stringify({
+            cases: [
+              {
+                name: "页面可打开",
+                criterion: 0,
+                steps: [{ action: "click", selector: "html" }],
+                expect: [{ selector: "html", visible: true }],
+              },
+            ],
           });
         if (prompt.includes("任务：作品验收")) {
           reviews++;
-          return JSON.stringify({
+          return reviewJSON(prompt, {
             pass: reviews === 2,
             issues: reviews === 2 ? [] : ["补充界面"],
           });
@@ -964,7 +1129,7 @@ test("软件返工承接上一轮可用文件，同时保留上一轮原件", as
       competitionId: ctx.id,
       idea,
     });
-    assert.equal(builds, 2);
+    assert.ok(builds >= 2);
     assert.doesNotMatch(
       await readFile(join(folders[0], "index.html"), "utf8"),
       /修订界面/,
@@ -1059,7 +1224,7 @@ test("一个图片任务要求多张图时被拦下，要求拆分", () => {
   );
 });
 
-test("评审只按阻塞问题判定：细节建议不阻止通过，待补资料汇总成单独文件", async () => {
+test("正文仍依赖未提供的资料时保留产物但不登记完成", async () => {
   const ctx = await setup(brief([item("方案报告", ["docx"])]));
   try {
     let writes = 0,
@@ -1067,12 +1232,13 @@ test("评审只按阻塞问题判定：细节建议不阻止通过，待补资�
       writePrompt = "";
     const g = {
       search: async () => [],
+      inspectImage: async (prompt) => reviewJSON(prompt, { issues: [], suggestions: [] }),
       generate: async (role, prompt) => {
         if (prompt.includes("拆解成可以实际制作的文件任务"))
-          throw Error("规划不可用");
+          return JSON.stringify({ tasks: [documentTask({ format: "docx" })], packages: [], notes: [] });
         if (prompt.includes("任务：作品验收")) {
           reviewPrompt = prompt;
-          return JSON.stringify({
+          return reviewJSON(prompt, {
             issues: [],
             suggestions: ["第3节标题层级可统一"],
             needs_input: ["团队实测的开启力数据"],
@@ -1092,21 +1258,17 @@ test("评审只按阻塞问题判定：细节建议不阻止通过，待补资�
         throw Error("unexpected");
       },
     };
-    const result = await runOrchestration(ctx.cfg, ctx.store, g, {
-      jobId: ctx.job,
-      competitionId: ctx.id,
-      idea,
-    });
-    assert.equal(writes, 1, "只有建议时不返工");
-    assert.equal(result.deliverables[0].review.pass, true);
+    await assert.rejects(runOrchestration(ctx.cfg, ctx.store, g, {
+      jobId: ctx.job, competitionId: ctx.id, idea,
+    }), /缺少完成作品所需资料/);
+    assert.equal(writes, 2);
     assert.match(writePrompt, /不要防御性写作/);
-    assert.match(reviewPrompt, /细枝末节/);
-    const file = result.outputs.find((x) => x.endsWith("需要你提供的资料.md"));
-    assert.ok(file, "生成待补资料文件");
-    const text = await readFile(file, "utf8");
-    assert.match(text, /10 名目标用户的访谈记录/);
-    assert.match(text, /团队实测的开启力数据/);
-    assert.doesNotMatch(result.gaps.join(" "), /标题层级/, "建议不进入缺口");
+    assert.ok(!ctx.store.artifacts(ctx.job).some((a) => a.kind === "submission"));
+    const states = (await readdir(join(ctx.dir, "jobs", ctx.job))).filter((x) => x.endsWith("-state.json"));
+    assert.equal(states.length, 2);
+    const state = JSON.parse(await readFile(join(ctx.dir, "jobs", ctx.job, states[0]), "utf8"));
+    assert.equal(state.review.pass, false);
+    assert.match(await readSource(state.attempt.paths[0]), /待补充/);
   } finally {
     await ctx.done();
   }
@@ -1118,11 +1280,12 @@ test("评审给出阻塞问题时，即使模型写 pass:true 也判不通过", 
     let writes = 0;
     const g = {
       search: async () => [],
+      inspectImage: async (prompt) => reviewJSON(prompt, { issues: [], suggestions: [] }),
       generate: async (role, prompt) => {
         if (prompt.includes("拆解成可以实际制作的文件任务"))
-          throw Error("规划不可用");
+          return JSON.stringify({ tasks: [documentTask({ format: "docx" })], packages: [], notes: [] });
         if (prompt.includes("任务：作品验收"))
-          return JSON.stringify(
+          return reviewJSON(prompt,
             writes === 1
               ? { pass: true, issues: ["核心机制只有一句话，没有原理说明"] }
               : { issues: [] },
@@ -1173,8 +1336,10 @@ test("评审看实际图片：通过即完成视觉验收；PPT 嵌入先生成�
       }),
       inspectImage: async (prompt, image, agent) => {
         seen.push({ agent, mime: image.mime, bytes: image.data.length });
-        assert.match(prompt, /实际生成的图片/);
-        return JSON.stringify({ issues: [], suggestions: [], needs_input: [] });
+        assert.doesNotMatch(prompt, /undefined|NaN/);
+        if (prompt.includes("实际生成的图片"))
+          assert.match(prompt, /实际生成的图片/);
+        return reviewJSON(prompt, { issues: [], suggestions: [], needs_input: [] });
       },
       generate: async (role, prompt) => {
         if (prompt.includes("拆解成可以实际制作的文件任务"))
@@ -1210,7 +1375,7 @@ test("评审看实际图片：通过即完成视觉验收；PPT 嵌入先生成�
         if (prompt.includes("设计一张独特的图片作品"))
           return JSON.stringify({ image_prompt: "产品", caption: "效果图" });
         if (prompt.includes("任务：作品验收"))
-          return JSON.stringify({ issues: [] });
+          return reviewJSON(prompt, { issues: [] });
         if (prompt.includes("直接创作")) {
           slidePrompt = prompt;
           return JSON.stringify({
@@ -1251,9 +1416,11 @@ test("评审看实际图片：通过即完成视觉验收；PPT 嵌入先生成�
       competitionId: ctx.id,
       idea,
     });
-    assert.equal(seen.length, 1);
-    assert.equal(seen[0].agent, "reviewer");
-    assert.equal(seen[0].mime, "image/jpeg");
+    // 图片作品的真实画面必须经过看图评审。
+    assert.ok(
+      seen.some((x) => x.agent === "reviewer" && x.mime === "image/jpeg"),
+    );
+    assert.ok(seen.every((x) => x.mime === "image/jpeg"));
     const render = result.deliverables.find((d) => d.id === "render");
     assert.equal(render.checks.find((c) => c.id === "visual").status, "passed");
     assert.match(slidePrompt, /"ref":"render"/, "PPT 写作时已知道图片");
@@ -1343,6 +1510,7 @@ test("长文档先列大纲再逐章写，返工时只重写评审指出的章�
     let reviews = 0;
     const g = {
       search: async () => [],
+      inspectImage: async (prompt) => reviewJSON(prompt, { issues: [], suggestions: [] }),
       generate: async (role, prompt) => {
         if (prompt.includes("拆解成可以实际制作的文件任务"))
           return JSON.stringify({
@@ -1381,11 +1549,11 @@ test("长文档先列大纲再逐章写，返工时只重写评审指出的章�
           calls.section.push(n);
           return n === "1"
             ? "## 背景\n背景正文。"
-            : `## 机制\n${prompt.includes("机制只有一句话") ? "机制原理的详细说明，用户访谈【待补充：5 名用户的访谈记录】。" : "机制一句话。"}`;
+            : `## 机制\n${prompt.includes("机制只有一句话") ? "机制原理的详细说明，附后续用户访谈验证方案。" : "机制一句话。"}`;
         }
         if (prompt.includes("任务：作品验收")) {
           reviews++;
-          return JSON.stringify(
+          return reviewJSON(prompt,
             reviews === 1
               ? { issues: ["机制只有一句话，需展开原理"] }
               : { issues: [] },
@@ -1407,13 +1575,124 @@ test("长文档先列大纲再逐章写，返工时只重写评审指出的章�
     const text = await readSource(d.artifactPaths[0]);
     assert.match(text, /背景正文/);
     assert.match(text, /机制原理的详细说明/);
-    assert.ok(
-      d.needsInput.some((x) => x.includes("5 名用户的访谈记录")),
-      "正文中的待补充标记进入资料清单",
-    );
+    assert.deepEqual(d.needsInput, [], "通过的正文没有未提供的硬输入");
   } finally {
     await ctx.done();
   }
+});
+
+function chapterGateway(outlineForRound, bodyForChapter) {
+  const calls = { outlines: 0, chapters: [], reviews: 0 };
+  return {
+    calls,
+    search: async () => [],
+    inspectImage: async (prompt) => reviewJSON(prompt, { issues: [] }),
+    generate: async (role, prompt) => {
+      if (prompt.includes("拆解成可以实际制作的文件任务"))
+        return JSON.stringify({ tasks: [documentTask({ instructions: "写一份 8000 字的设计说明书" })] });
+      if (prompt.includes("先只输出大纲"))
+        return JSON.stringify(outlineForRound(++calls.outlines, prompt));
+      if (prompt.includes("分章写作：现在只写")) {
+        const heading = prompt.match(/以「([^」]+)」开头/)[1];
+        calls.chapters.push(heading);
+        return bodyForChapter(heading, prompt, calls.outlines);
+      }
+      if (prompt.includes("任务：作品验收")) {
+        calls.reviews++;
+        return reviewJSON(prompt, { issues: calls.reviews === 1 ? ["请按评审完善内容"] : [] });
+      }
+      throw Error("unexpected " + prompt.slice(0, 60));
+    },
+  };
+}
+const chapterOutline = () => ({
+  title: "设计说明书",
+  facts: ["设计参数：厚度：5 mm"],
+  sections: ["## 背景", "## 机制"].map((heading) => ({
+    heading, points: ["设计依据"], chars: 4000, rewrite: false,
+  })),
+  needs_input: [],
+});
+const chapterBody = (heading, prompt, round) =>
+  `${heading}\n${(prompt.includes('厚度：8 mm') ? "设计厚度8毫米。" : "设计厚度5毫米。").repeat(600)}第${round}版正文。`;
+
+for (const [name, change, expected] of [
+  ["共享参数变化", (o) => { o.facts = ["设计参数：厚度：8 mm"]; }, ["## 背景", "## 机制"]],
+  ["章节重排", (o) => { o.sections.reverse(); }, ["## 机制", "## 背景"]],
+  ["章节要点变化", (o) => { o.sections[0].points = ["更新后的设计依据"]; }, ["## 背景", "## 机制"]],
+  ["篇幅分配变化", (o) => { o.sections[0].chars = 4500; o.sections[1].chars = 3500; }, ["## 背景", "## 机制"]],
+  ["上章正文变化", (o) => { o.sections[0].rewrite = true; }, ["## 背景", "## 机制"]],
+  ["依赖无变化", () => {}, []],
+]) test(`分章复用：${name}时不能仅相信 rewrite:false`, async () => {
+  const c = await setup(brief([item("报告", ["txt"])]));
+  const g = chapterGateway((round) => {
+    const outline = chapterOutline();
+    if (round > 1) change(outline);
+    return outline;
+  }, chapterBody);
+  const input = { jobId: c.job, competitionId: c.id, idea };
+  try {
+    const result = await runOrchestration(c.cfg, c.store, g, input);
+    assert.deepEqual(g.calls.chapters, ["## 背景", "## 机制", ...expected]);
+    assert.equal(g.calls.outlines, 2);
+    assert.equal(result.deliverables[0].rounds, 2);
+    const text = await readFile(result.deliverables[0].artifactPaths[0], "utf8");
+    if (name === "共享参数变化") {
+      assert.doesNotMatch(text, /厚度5毫米/);
+      assert.match(text, /厚度8毫米/);
+      const saved = await readdir(join(c.dir, "jobs", c.job));
+      assert.ok(saved.some((file) => file.endsWith("-r1-sections.json")), "保留旧章文件便于恢复");
+    }
+    if (name === "章节重排") assert.ok(text.indexOf("机制") < text.indexOf("背景"));
+    const beforeResume = structuredClone(g.calls);
+    await runOrchestration(c.cfg, c.store, g, input);
+    assert.deepEqual(g.calls, beforeResume, "输入无变化时复用已通过的生成和验收结果");
+  } finally { await c.done(); }
+});
+
+for (const [name, change, body, error] of [
+  ["大纲篇幅不足", (o) => { o.sections.forEach((s) => { s.chars = 1000; }); }, chapterBody, /大纲.*字数/],
+  ["标题重复", (o) => { o.sections[1].heading = o.sections[0].heading; }, chapterBody, /章节标题.*重复/],
+  ["标题样式不同但同名", (o) => { o.sections[1].heading = " 背景 "; }, chapterBody, /章节标题.*重复/],
+  ["只有标题没有正文", () => {}, (heading) => `${heading}\n\n### 小节标题`, /章节正文为空/],
+]) test(`分章校验：${name}经过有界返工仍不合格就失败`, async () => {
+  const c = await setup(brief([item("报告", ["txt"])]));
+  const g = chapterGateway(() => {
+    const outline = chapterOutline();
+    change(outline);
+    return outline;
+  }, body);
+  try {
+    await assert.rejects(runOrchestration(c.cfg, c.store, g, {
+      jobId: c.job, competitionId: c.id, idea,
+    }), error);
+    assert.equal(g.calls.outlines, 2, "遵守既有 productionRounds，不降低要求或无限重试");
+    assert.equal(g.calls.reviews, 0, "结构无效不能送去由模型放行");
+    assert.ok(!c.store.artifacts(c.job).some((a) => a.kind === "submission"));
+    if (name !== "只有标题没有正文") assert.deepEqual(g.calls.chapters, []);
+  } finally { await c.done(); }
+});
+
+test("大纲篇幅检查给下一轮同标准反馈，修复后可以完成", async () => {
+  const c = await setup(brief([item("报告", ["txt"])]));
+  const g = chapterGateway((round, prompt) => {
+    const outline = chapterOutline();
+    if (round === 1) outline.sections.forEach((s) => { s.chars = 1000; });
+    else {
+      assert.match(prompt, /大纲.*字数/);
+      assert.match(prompt, /chars 之和不少于 8000/);
+    }
+    return outline;
+  }, chapterBody);
+  // 此用例只触发制作返工，不额外制造一次评审返工。
+  g.calls.reviews = 1;
+  try {
+    const result = await runOrchestration(c.cfg, c.store, g, {
+      jobId: c.job, competitionId: c.id, idea,
+    });
+    assert.equal(result.deliverables[0].rounds, 2);
+    assert.deepEqual(g.calls.chapters, ["## 背景", "## 机制"]);
+  } finally { await c.done(); }
 });
 
 test("从制作要求中识别目标字数", async () => {
@@ -1468,11 +1747,16 @@ test("compete materials 导入用户资料，写作提示词把它当作可用�
       };
       const g = {
         search: async () => [],
+      inspectImage: async (prompt) => reviewJSON(prompt, { issues: [], suggestions: [] }),
         generate: async (role, p) => {
           if (p.includes("拆解成可以实际制作的文件任务"))
-            throw Error("规划不可用");
+            return JSON.stringify({
+              tasks: [documentTask({ format: "docx" })],
+              packages: [],
+              notes: [],
+            });
           if (p.includes("任务：作品验收"))
-            return JSON.stringify({ issues: [] });
+            return reviewJSON(p, { issues: [] });
           if (p.includes("直接创作")) {
             prompt = p;
             return JSON.stringify({
@@ -1506,14 +1790,19 @@ test("评审输出不是有效 JSON 时重试一次，而不是记为未评审",
     let reviews = 0;
     const g = {
       search: async () => [],
+      inspectImage: async (prompt) => reviewJSON(prompt, { issues: [], suggestions: [] }),
       generate: async (role, prompt) => {
         if (prompt.includes("拆解成可以实际制作的文件任务"))
-          throw Error("规划不可用");
+          return JSON.stringify({
+            tasks: [documentTask({ format: "docx" })],
+            packages: [],
+            notes: [],
+          });
         if (prompt.includes("任务：作品验收")) {
           reviews++;
           return reviews === 1
             ? '{"issues":["被截断'
-            : JSON.stringify({ issues: [] });
+            : reviewJSON(prompt, { issues: [] });
         }
         if (prompt.includes("直接创作"))
           return JSON.stringify({
@@ -1548,15 +1837,20 @@ async function formatServer(html) {
 }
 const formatGateway = (url, quote, writes) => ({
   search: async () => [{ url, title: "征文要求", snippet: "" }],
+  inspectImage: async (prompt) => reviewJSON(prompt, { issues: [], suggestions: [] }),
   generate: async (role, prompt) => {
     if (prompt.includes("没有写提交文件格式"))
       return JSON.stringify({
         items: [{ deliverable: 0, formats: ["docx"], url, quote }],
       });
     if (prompt.includes("拆解成可以实际制作的文件任务"))
-      throw Error("规划不可用");
+      return JSON.stringify({
+        tasks: [documentTask({ format: "docx" })],
+        packages: [],
+        notes: [],
+      });
     if (prompt.includes("任务：作品验收"))
-      return JSON.stringify({ issues: [] });
+      return reviewJSON(prompt, { issues: [] });
     if (prompt.includes("直接创作")) {
       writes.push(prompt);
       return JSON.stringify({
@@ -1601,30 +1895,27 @@ test("公告没写格式时搜索官方要求，引用核对通过后作品成�
   }
 });
 
-test("格式引用在页面里找不到时不采纳，保持草稿并向用户索要格式要求", async () => {
+test("格式引用在页面里找不到时不采纳，任务失败并要求补充官方要求", async () => {
   const { server, url } = await formatServer(
     "<title>征文通知</title><p>欢迎投稿，具体要求见网盘附件。</p>",
   );
   const ctx = await setup(brief([item("征文论文", [])]));
   try {
     const writes = [];
-    const result = await runOrchestration(
-      ctx.cfg,
-      ctx.store,
-      formatGateway(url, "论文请以 PDF 格式提交", writes),
-      { jobId: ctx.job, competitionId: ctx.id, idea },
+    await assert.rejects(
+      runOrchestration(
+        ctx.cfg,
+        ctx.store,
+        formatGateway(url, "论文请以 PDF 格式提交", writes),
+        { jobId: ctx.job, competitionId: ctx.id, idea },
+      ),
+      /提交文件格式未核实[\s\S]*compete materials/,
     );
     assert.deepEqual(
       ctx.store.competition(ctx.id).brief.deliverables[0].formats,
       [],
     );
-    assert.notEqual(result.deliverables[0].status, "submission");
-    const file = result.outputs.find((x) => x.endsWith("需要你提供的资料.md"));
-    assert.ok(file);
-    const text = await readFile(file, "utf8");
-    assert.match(text, /## 提交格式/);
-    assert.match(text, /征文论文/);
-    assert.match(text, /compete materials/);
+    assert.equal(writes.length, 0, "格式没核实就不该开始写");
   } finally {
     server.close();
     await ctx.done();
@@ -1661,6 +1952,7 @@ test("图片模型拒绝某个画面时只返工这张图，不中止整个任�
     const briefs = [];
     const g = {
       search: async () => [],
+      inspectImage: async (prompt) => reviewJSON(prompt, { issues: [], suggestions: [] }),
       generateImage: async () => {
         draws++;
         if (draws === 1)
@@ -1691,7 +1983,7 @@ test("图片模型拒绝某个画面时只返工这张图，不中止整个任�
           return JSON.stringify({ image_prompt: "产品渲染", caption: "" });
         }
         if (prompt.includes("任务：作品验收"))
-          return JSON.stringify({ issues: [] });
+          return reviewJSON(prompt, { issues: [] });
         throw Error("unexpected");
       },
     };
@@ -1715,6 +2007,7 @@ test("最后一步把所有交付物汇总成一个最终提交包，按交付�
   try {
     const g = {
       search: async () => [],
+      inspectImage: async (prompt) => reviewJSON(prompt, { issues: [], suggestions: [] }),
       generate: async (role, prompt) => {
         if (prompt.includes("拆解成可以实际制作的文件任务"))
           return JSON.stringify({
@@ -1741,7 +2034,7 @@ test("最后一步把所有交付物汇总成一个最终提交包，按交付�
             packages: [],
           });
         if (prompt.includes("任务：作品验收"))
-          return JSON.stringify({ issues: [] });
+          return reviewJSON(prompt, { issues: [] });
         if (prompt.includes("直接创作"))
           return JSON.stringify(
             prompt.includes("任务：展示PPT")
@@ -1797,6 +2090,52 @@ test("最后一步把所有交付物汇总成一个最终提交包，按交付�
       !names.some((n) => n.includes("需要你提供的资料")),
       "待补资料不进提交包",
     );
+  } finally {
+    await ctx.done();
+  }
+});
+
+test("规划里只有真正的硬缺口才交给用户确认", async () => {
+  const ctx = await setup(brief([item("散文作品", ["docx"])]));
+  try {
+    const g = {
+      search: async () => [],
+      inspectImage: async (prompt) => reviewJSON(prompt, { issues: [], suggestions: [] }),
+      generate: async (role, prompt) => {
+        if (prompt.includes("拆解成可以实际制作的文件任务"))
+          return JSON.stringify({
+            tasks: [documentTask({ format: "docx" })],
+            packages: [],
+            notes: [
+              "本轮仅需提交1个DOCX文件，直接作为作品提交，不需要打包。",
+              "征稿未提供官方模板或文件命名规则；计划采用可识别文件名。",
+              "通知未显示报名截止时间与提交方式，无法确定是否仍需报名。",
+            ],
+          });
+        if (prompt.includes("任务：作品验收"))
+          return reviewJSON(prompt, { issues: [] });
+        if (prompt.includes("直接创作"))
+          return JSON.stringify({
+            kind: "text",
+            title: "作品",
+            text: "## 正文\n经过实际生成的正文。",
+            sources: [],
+          });
+        throw Error("unexpected prompt");
+      },
+    };
+    const result = await runOrchestration(ctx.cfg, ctx.store, g, {
+      jobId: ctx.job,
+      competitionId: ctx.id,
+      idea,
+    });
+    const file = result.outputs.find((x) => x.endsWith("需要你提供的资料.md"));
+    assert.ok(file, "仍有硬缺口时生成待补文件");
+    const text = await readFile(file, "utf8");
+    assert.match(text, /报名截止时间/, "硬缺口交给用户");
+    assert.doesNotMatch(text, /不需要打包/, "执行说明不是用户待办");
+    assert.doesNotMatch(text, /未提供官方模板/, "系统已自行处理的不要重复问");
+    assert.equal(result.deliverables[0].status, "submission");
   } finally {
     await ctx.done();
   }

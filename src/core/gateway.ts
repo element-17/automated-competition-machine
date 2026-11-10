@@ -1,7 +1,15 @@
-import { GoogleGenAI } from "@google/genai";
+import { GoogleGenAI, type GenerateContentResponse } from "@google/genai";
 import Anthropic from "@anthropic-ai/sdk";
 import { mkdir } from "node:fs/promises";
-import { join } from "node:path";
+import { randomUUID } from "node:crypto";
+import { join, resolve } from "node:path";
+import {
+  appendModelCall,
+  providerUsage,
+  type ModelCallContext,
+  type ModelCallEvent,
+  type ModelUsage,
+} from "./model-metrics.js";
 import {
   executionSettings,
   searchSettings,
@@ -70,7 +78,78 @@ export type GatewayProgress = {
   budget?: { used: number; limit: number };
 };
 
-/** 按 Agent 配置的供应商协议调用模型；研究和编码交给所选运行时。 */
+/** 空正文属于单次上游请求失败，包括只返回 reasoning/thinking 的响应。 */
+export class EmptyModelResponseError extends Error {
+  readonly code = "EMPTY_MODEL_RESPONSE";
+  readonly retryable = true;
+  constructor(message = "模型返回空正文（empty response；思考过程不作为正文）", options?: ErrorOptions) {
+    super(message, options);
+    this.name = "EmptyModelResponseError";
+  }
+}
+export type IncompleteResponseReason =
+  | "truncated" | "refused" | "unfinished"
+  | "stream_interrupted" | "invalid_response";
+
+/** 不保留响应正文或供应商错误原文；仅连接不完整允许在既有预算内重试。 */
+export class IncompleteModelResponseError extends Error {
+  readonly code = "INCOMPLETE_MODEL_RESPONSE";
+  readonly retryable: boolean;
+  constructor(
+    readonly reason: IncompleteResponseReason,
+    message = `模型响应未完整完成（${reason}）；不接受部分正文`,
+    options?: ErrorOptions,
+  ) {
+    super(message, options);
+    this.name = "IncompleteModelResponseError";
+    this.retryable = reason === "stream_interrupted";
+  }
+}
+const requireBody = (text: string) => {
+  if (!text.trim()) throw new EmptyModelResponseError();
+  return text;
+};
+const requireCompletedBody = (text: string, completed: boolean) => {
+  // 空正文仍由 requestText 在同一请求边界内分类及重试。
+  if (text.trim() && !completed) throw new IncompleteModelResponseError("unfinished");
+  return text;
+};
+type AttemptUsage = { usage: ModelUsage | null };
+
+// 显式失败优先于空正文分类；非空 HTTP JSON 还必须提供明确正常终止状态。
+function checkOpenAICompletion(reason: unknown, refusal: unknown) {
+  if (typeof refusal === "string" && refusal.length > 0)
+    throw new IncompleteModelResponseError("refused");
+  if (reason === "length" || reason === "max_tokens")
+    throw new IncompleteModelResponseError("truncated");
+  if (reason === "content_filter" || reason === "refusal")
+    throw new IncompleteModelResponseError("refused");
+  if (reason != null && reason !== "stop")
+    throw new IncompleteModelResponseError("unfinished");
+}
+function checkGeminiCompletion(response: GenerateContentResponse) {
+  const blocked = response.promptFeedback?.blockReason;
+  if (blocked && blocked !== "BLOCKED_REASON_UNSPECIFIED")
+    throw new IncompleteModelResponseError("refused");
+  const reason = response.candidates?.[0]?.finishReason;
+  if (reason === "MAX_TOKENS" || reason === "CONTINUATION")
+    throw new IncompleteModelResponseError("truncated");
+  if (reason && ["SAFETY", "RECITATION", "LANGUAGE", "BLOCKLIST",
+    "PROHIBITED_CONTENT", "SPII", "IMAGE_SAFETY",
+    "IMAGE_PROHIBITED_CONTENT", "IMAGE_RECITATION"].includes(reason))
+    throw new IncompleteModelResponseError("refused");
+  if (reason != null && reason !== "STOP")
+    throw new IncompleteModelResponseError("unfinished");
+}
+function checkAnthropicCompletion(response: Anthropic.Message) {
+  const reason = response.stop_reason;
+  if (reason === "max_tokens" || reason === "model_context_window_exceeded")
+    throw new IncompleteModelResponseError("truncated");
+  if (reason === "refusal") throw new IncompleteModelResponseError("refused");
+  if (reason != null && reason !== "end_turn")
+    throw new IncompleteModelResponseError("unfinished");
+}
+
 /** 按文件头判断图片类型。 */
 const sniff = (b: Buffer) =>
   b[0] === 0x89 && b[1] === 0x50
@@ -186,6 +265,7 @@ export class OfficialGateway implements ModelGateway {
   async generate(role: ModelRole, prompt: string, agent: AgentName = role) {
     this.charge();
     const a = this.agent(agent);
+    const context = this.callContext(a, "generate", role);
     try {
       const system = promptOf(this.cfg, agent);
       const budgetMs =
@@ -210,12 +290,11 @@ export class OfficialGateway implements ModelGateway {
             },
             system,
             prompt,
-            () => this.complete(a, system, prompt),
+            () => this.complete(a, system, prompt, context),
             (value) => value,
           ),
         budgetMs,
       );
-      if (!text.trim()) throw Error(`${a.provider.label} 返回空内容`);
       this.onProgress?.({
         agent,
         model: a.model,
@@ -225,56 +304,106 @@ export class OfficialGateway implements ModelGateway {
       });
       return text;
     } catch (e) {
-      throw Error(
-        `${agentNames[agent]}模型（${a.provider.label}）调用失败：${e instanceof Error ? e.message : String(e)}；不会切换其他模型`,
-      );
+      const message = `${agentNames[agent]}模型（${a.provider.label}）调用失败：${e instanceof Error ? e.message : String(e)}；不会切换其他模型`;
+      throw e instanceof EmptyModelResponseError
+        ? new EmptyModelResponseError(message, { cause: e })
+        : e instanceof IncompleteModelResponseError
+          ? new IncompleteModelResponseError(e.reason, message, { cause: e })
+          : new Error(message, { cause: e });
+    }
+  }
+  private callContext(
+    a: ResolvedAgent,
+    operation: ModelCallContext["operation"],
+    role: string,
+    scope: ModelCallContext["scope"] = "model",
+  ): ModelCallContext {
+    return {
+      callId: randomUUID(),
+      scope,
+      operation,
+      role,
+      agent: a.name,
+      providerId: a.provider.id,
+      protocol: a.provider.protocol,
+      model: a.model,
+      stage: this.phase?.stage,
+      taskId: this.phase?.taskId,
+      round: this.phase?.round,
+      ...(scope === "runtime" ? { runtime: a.runtime } : {}),
+    };
+  }
+  private async measured<T>(
+    context: ModelCallContext,
+    attempt: number,
+    run: (metrics: AttemptUsage) => Promise<T>,
+  ): Promise<T> {
+    const record = (event: ModelCallEvent) => this.jobId
+      ? appendModelCall(this.cfg.dataDir, this.jobId, event)
+      : Promise.resolve(false);
+    const started = performance.now();
+    const startWrite = record({ ...context, version: 1, attempt, at: new Date().toISOString(), event: "start" });
+    const metrics: AttemptUsage = { usage: null };
+    let result: ModelCallEvent;
+    try {
+      const value = await run(metrics);
+      result = { ...context, version: 1, attempt, at: new Date().toISOString(), event: "result", status: "success", durationMs: performance.now() - started, usage: metrics.usage };
+      return value;
+    } catch (error) {
+      result = {
+        ...context, version: 1, attempt, at: new Date().toISOString(),
+        event: "result", status: "failure", durationMs: performance.now() - started, usage: metrics.usage,
+        errorKind: error instanceof EmptyModelResponseError ? "empty_response"
+          : error instanceof Error && /timeout|abort/i.test(error.name) ? "timeout" : "upstream",
+      };
+      throw error;
+    } finally {
+      // IO 从不影响成功/失败判定；等待刷盘便于调用方随后读取完整记录。
+      await Promise.all([startWrite, record(result!)]);
     }
   }
   private async complete(
     a: ResolvedAgent,
     system: string,
     prompt: string,
+    context: ModelCallContext,
   ): Promise<string> {
-    // 重试共享同一个截止时间：否则“每次尝试都用完整超时”会让一次调用拖到几十分钟，外部看就是卡死。
+    this.key(a);
+    return this.requestText(context, (timeout, metrics) =>
+      this.completeOnce(a, system, prompt, timeout, metrics));
+  }
+  private async requestText(
+    context: ModelCallContext,
+    run: (timeoutMs: number, metrics: AttemptUsage) => Promise<string>,
+  ): Promise<string> {
+    // 文本和看图共用截止时间，退避与所有尝试都计入同一个总时限。
     const settings = executionSettings(this.cfg),
-      deadline =
-        Date.now() +
-        settings.requestTimeoutSeconds * settings.requestAttempts * 1000;
+      deadline = Date.now() + settings.requestTimeoutSeconds * settings.requestAttempts * 1000;
     let last: unknown;
     for (let attempt = 0; attempt < settings.requestAttempts; attempt++) {
       const remaining = deadline - Date.now();
       if (remaining <= 0) break;
       try {
-        return await this.completeOnce(
-          a,
-          system,
-          prompt,
-          Math.min(settings.requestTimeoutSeconds * 1000, remaining),
-        );
+        return await this.measured(context, attempt + 1, async (metrics) =>
+          requireBody(await run(Math.min(settings.requestTimeoutSeconds * 1000, remaining), metrics)));
       } catch (e) {
         last = e;
         if (!this.retryable(e)) throw e;
-        // 最后一次失败直接抛出，不再空等一轮退避。
         if (attempt === settings.requestAttempts - 1) break;
-        const pause = Math.min(
-          2000 * 3 ** attempt,
-          30000,
-          deadline - Date.now(),
-        );
+        const pause = Math.min(2000 * 3 ** attempt, 30000, deadline - Date.now());
         if (pause <= 0) break;
         await new Promise((r) => setTimeout(r, pause));
       }
     }
-    throw (
-      last ||
-      Error(
-        `模型调用超过 ${settings.requestTimeoutSeconds * settings.requestAttempts} 秒总时限`,
-      )
-    );
+    throw (last || Error(`模型调用超过 ${settings.requestTimeoutSeconds * settings.requestAttempts} 秒总时限`));
   }
   private retryable(error: unknown) {
+    if (error instanceof EmptyModelResponseError || error instanceof IncompleteModelResponseError)
+      return error.retryable;
     const message = error instanceof Error ? error.message : String(error);
-    return /timeout|timed out|aborted|fetch failed|network|socket|ECONN|429|500|502|503|504|52[0-4]|overloaded|temporar|rate.?limit/i.test(
+    // 中转站和长连接常见 "terminated"、"other side closed"、"premature close"，
+    // 都属于连接被对端中断，重试通常能成功。
+    return /timeout|timed out|aborted|abort|terminated|other side closed|premature close|fetch failed|network|socket|ECONN|EPIPE|ETIMEDOUT|429|500|502|503|504|52[0-4]|overloaded|temporar|rate.?limit|without output text|reasoning without|empty (?:response|content)/i.test(
       message,
     );
   }
@@ -283,6 +412,7 @@ export class OfficialGateway implements ModelGateway {
     system: string,
     prompt: string,
     timeoutMs: number,
+    metrics: AttemptUsage,
   ): Promise<string> {
     const key = this.key(a),
       signal = AbortSignal.timeout(timeoutMs),
@@ -291,13 +421,17 @@ export class OfficialGateway implements ModelGateway {
       const baseUrl = p.baseURL || process.env.COMPETE_GEMINI_BASE_URL;
       const response = await new GoogleGenAI({
         apiKey: key,
-        ...(baseUrl ? { httpOptions: { baseUrl } } : {}),
+        httpOptions: { ...(baseUrl ? { baseUrl } : {}), retryOptions: { attempts: 1 } },
       }).models.generateContent({
         model: a.model,
         contents: prompt,
         config: { systemInstruction: system, abortSignal: signal },
       });
-      return response.text || "";
+      metrics.usage = providerUsage(p.protocol, response.usageMetadata);
+      checkGeminiCompletion(response);
+      return requireCompletedBody(response.candidates?.[0]?.content?.parts
+        ?.filter((part) => !part.thought && typeof part.text === "string")
+        .map((part) => part.text).join("") || "", response.candidates?.[0]?.finishReason === "STOP");
     }
     if (p.protocol === "anthropic") {
       const deepseek = /(^|\.)deepseek\.com$/.test(
@@ -317,10 +451,12 @@ export class OfficialGateway implements ModelGateway {
         },
         { signal },
       );
-      return response.content
+      metrics.usage = providerUsage(p.protocol, response?.usage);
+      checkAnthropicCompletion(response);
+      return requireCompletedBody((response?.content || [])
         .filter((x) => x.type === "text")
         .map((x) => x.text)
-        .join("\n");
+        .join("\n"), response.stop_reason === "end_turn");
     }
     // 流式请求：长文生成时中转站（Cloudflare 等）在约 100 秒无数据后会返回 524；服务端不支持流式而直接返回 JSON 时照常解析。
     const base = (p.baseURL || "https://api.openai.com/v1").replace(/\/$/, "");
@@ -341,45 +477,81 @@ export class OfficialGateway implements ModelGateway {
         ],
       }),
     });
+    return this.responseText(res, metrics);
+  }
+  private async responseText(res: Response, metrics: AttemptUsage): Promise<string> {
     if (!res.ok) {
       const json = (await res.json().catch(() => null)) as any;
       throw Error(`HTTP ${res.status} ${json?.error?.message || ""}`.trim());
     }
     if (!/text\/event-stream/i.test(res.headers.get("content-type") || "")) {
-      const json = (await res.json().catch(() => null)) as any;
-      const content = json?.choices?.[0]?.message?.content;
-      return typeof content === "string" ? content : "";
+      let json: any;
+      try {
+        json = await res.json();
+      } catch {
+        throw new IncompleteModelResponseError("invalid_response");
+      }
+      metrics.usage = providerUsage("openai", json?.usage);
+      if (json?.error) throw new IncompleteModelResponseError("invalid_response");
+      const choice = json?.choices?.[0];
+      checkOpenAICompletion(choice?.finish_reason, choice?.message?.refusal);
+      const content = choice?.message?.content;
+      return requireCompletedBody(typeof content === "string" ? content : "", choice?.finish_reason === "stop");
     }
-    let text = "",
-      buffer = "";
+    if (!res.body) throw new EmptyModelResponseError();
+    let text = "", buffer = "", eventType = "";
+    let dataLines: string[] = [];
+    let stopped = false, done = false;
     const decoder = new TextDecoder();
-    const line = (raw: string) => {
-      const l = raw.trim();
-      if (!l.startsWith("data:")) return;
-      const data = l.slice(5).trim();
-      if (!data || data === "[DONE]") return;
+    const event = () => {
+      const data = dataLines.join("\n").trim(), type = eventType;
+      dataLines = [];
+      eventType = "";
+      if (type === "error") throw new IncompleteModelResponseError("invalid_response");
+      if (!data) return;
+      if (done) throw new IncompleteModelResponseError("invalid_response");
+      if (data === "[DONE]") { done = true; return; }
       let chunk: any;
       try {
         chunk = JSON.parse(data);
       } catch {
-        return;
+        throw new IncompleteModelResponseError("invalid_response");
       }
-      if (chunk?.error)
-        throw Error(
-          `流式响应错误：${chunk.error.message || JSON.stringify(chunk.error).slice(0, 300)}`,
-        );
-      const delta =
-        chunk?.choices?.[0]?.delta?.content ??
-        chunk?.choices?.[0]?.message?.content;
-      if (typeof delta === "string") text += delta;
+      const usage = providerUsage("openai", chunk?.usage);
+      if (usage) metrics.usage = { ...metrics.usage, ...usage };
+      if (chunk?.error) throw new IncompleteModelResponseError("invalid_response");
+      const choice = chunk?.choices?.[0];
+      checkOpenAICompletion(choice?.finish_reason, choice?.delta?.refusal ?? choice?.message?.refusal);
+      // reasoning/thinking 不作为正文；不能以已收到前缀代替完整终止信息。
+      const delta = choice?.delta?.content ?? choice?.message?.content;
+      if (typeof delta === "string" && delta) {
+        if (stopped) throw new IncompleteModelResponseError("invalid_response");
+        text += delta;
+      }
+      if (choice?.finish_reason === "stop") stopped = true;
     };
-    for await (const part of res.body as unknown as AsyncIterable<Uint8Array>) {
-      buffer += decoder.decode(part, { stream: true });
-      const lines = buffer.split("\n");
-      buffer = lines.pop() || "";
-      for (const l of lines) line(l);
+    const line = (raw: string) => {
+      const value = raw.replace(/\r$/, "");
+      if (!value) { event(); return; }
+      if (value.startsWith("data:")) dataLines.push(value.slice(5).replace(/^ /, ""));
+      else if (value.startsWith("event:")) eventType = value.slice(6).trim();
+    };
+    try {
+      for await (const part of res.body as unknown as AsyncIterable<Uint8Array>) {
+        buffer += decoder.decode(part, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() || "";
+        for (const l of lines) line(l);
+      }
+      line(buffer + decoder.decode());
+      event();
+    } catch (error) {
+      if (error instanceof IncompleteModelResponseError) throw error;
+      throw new IncompleteModelResponseError("stream_interrupted");
     }
-    line(buffer + decoder.decode());
+    // 保留完全空/只含思考响应的原有重试分类；显式错误已在上面优先拒绝。
+    requireBody(text);
+    if (!stopped || !done) throw new IncompleteModelResponseError("stream_interrupted");
     return text;
   }
   /** 未传 options 时只取一页且不限时间，供研究往届资料使用；赛事发现会传入配置的页数和时间范围。 */
@@ -490,115 +662,130 @@ export class OfficialGateway implements ModelGateway {
     this.charge();
     const a = this.agent(agent);
     const system = promptOf(this.cfg, agent);
-    const b64 = image.data.toString("base64");
+    const settings = executionSettings(this.cfg);
     try {
-      const text = await this.tracked(a, "查看图片并评审", async () => {
-        const key = this.key(a),
-          signal = AbortSignal.timeout(
-            executionSettings(this.cfg).requestTimeoutSeconds * 1000,
-          ),
-          p = a.provider;
-        if (p.protocol === "anthropic") {
-          const deepseek = /(^|\.)deepseek\.com$/.test(
-            p.baseURL ? new URL(p.baseURL).hostname : "",
-          );
-          const r = await new Anthropic({
-            apiKey: key,
-            maxRetries: 0,
-            ...(p.baseURL ? { baseURL: p.baseURL } : {}),
-          }).messages.create(
+      this.key(a);
+      return await this.tracked(
+        a,
+        "查看图片并评审",
+        () => this.requestText(this.callContext(a, "inspectImage", "reviewer"),
+          (timeout, metrics) => this.inspectImageOnce(a, system, prompt, image, timeout, metrics)),
+        settings.requestTimeoutSeconds * settings.requestAttempts * 1000,
+      );
+    } catch (e) {
+      const message = `${agentNames[agent]}模型（${a.provider.label}）看图调用失败：${e instanceof Error ? e.message : String(e)}；不会切换其他模型`;
+      throw e instanceof EmptyModelResponseError
+        ? new EmptyModelResponseError(message, { cause: e })
+        : e instanceof IncompleteModelResponseError
+          ? new IncompleteModelResponseError(e.reason, message, { cause: e })
+          : new Error(message, { cause: e });
+    }
+  }
+  private async inspectImageOnce(
+    a: ResolvedAgent,
+    system: string,
+    prompt: string,
+    image: { data: Buffer; mime: string },
+    timeoutMs: number,
+    metrics: AttemptUsage,
+  ): Promise<string> {
+    const b64 = image.data.toString("base64");
+    const key = this.key(a),
+      signal = AbortSignal.timeout(timeoutMs),
+      p = a.provider;
+    if (p.protocol === "anthropic") {
+      const deepseek = /(^|\.)deepseek\.com$/.test(
+        p.baseURL ? new URL(p.baseURL).hostname : "",
+      );
+      const r = await new Anthropic({
+        apiKey: key,
+        maxRetries: 0,
+        ...(p.baseURL ? { baseURL: p.baseURL } : {}),
+      }).messages.create(
+        {
+          model: a.model,
+          max_tokens: 4096,
+          system,
+          ...(deepseek ? { thinking: { type: "disabled" as const } } : {}),
+          messages: [
             {
-              model: a.model,
-              max_tokens: 4096,
-              system,
-              ...(deepseek ? { thinking: { type: "disabled" as const } } : {}),
-              messages: [
+              role: "user",
+              content: [
                 {
-                  role: "user",
-                  content: [
-                    {
-                      type: "image",
-                      source: {
-                        type: "base64",
-                        media_type: image.mime as "image/png",
-                        data: b64,
-                      },
-                    },
-                    { type: "text", text: prompt },
-                  ],
+                  type: "image",
+                  source: {
+                    type: "base64",
+                    media_type: image.mime as "image/png",
+                    data: b64,
+                  },
                 },
+                { type: "text", text: prompt },
               ],
             },
-            { signal },
-          );
-          return r.content
-            .filter((x) => x.type === "text")
-            .map((x) => x.text)
-            .join("\n");
-        }
-        if (p.protocol === "gemini") {
-          const baseUrl = p.baseURL || process.env.COMPETE_GEMINI_BASE_URL;
-          const r = await new GoogleGenAI({
-            apiKey: key,
-            ...(baseUrl ? { httpOptions: { baseUrl } } : {}),
-          }).models.generateContent({
-            model: a.model,
-            contents: [
-              {
-                role: "user",
-                parts: [
-                  { inlineData: { mimeType: image.mime, data: b64 } },
-                  { text: prompt },
-                ],
-              },
-            ],
-            config: { systemInstruction: system, abortSignal: signal },
-          });
-          return r.text || "";
-        }
-        const base = (p.baseURL || "https://api.openai.com/v1").replace(
-          /\/$/,
-          "",
-        );
-        const res = await fetch(`${base}/chat/completions`, {
-          method: "POST",
-          signal,
-          headers: {
-            "content-type": "application/json",
-            authorization: `Bearer ${key}`,
-          },
-          body: JSON.stringify({
-            model: a.model,
-            messages: [
-              { role: "system", content: system },
-              {
-                role: "user",
-                content: [
-                  { type: "text", text: prompt },
-                  {
-                    type: "image_url",
-                    image_url: { url: `data:${image.mime};base64,${b64}` },
-                  },
-                ],
-              },
-            ],
-          }),
-        });
-        const json = (await res.json().catch(() => null)) as any;
-        if (!res.ok)
-          throw Error(
-            `HTTP ${res.status} ${json?.error?.message || ""}`.trim(),
-          );
-        const content = json?.choices?.[0]?.message?.content;
-        return typeof content === "string" ? content : "";
-      });
-      if (!text.trim()) throw Error(`${a.provider.label} 返回空内容`);
-      return text;
-    } catch (e) {
-      throw Error(
-        `${agentNames[agent]}模型（${a.provider.label}）看图调用失败：${e instanceof Error ? e.message : String(e)}`,
+          ],
+        },
+        { signal },
       );
+      metrics.usage = providerUsage(p.protocol, r?.usage);
+      checkAnthropicCompletion(r);
+      return requireCompletedBody((r?.content || [])
+        .filter((x) => x.type === "text")
+        .map((x) => x.text)
+        .join("\n"), r.stop_reason === "end_turn");
     }
+    if (p.protocol === "gemini") {
+      const baseUrl = p.baseURL || process.env.COMPETE_GEMINI_BASE_URL;
+      const r = await new GoogleGenAI({
+        apiKey: key,
+        httpOptions: {
+          ...(baseUrl ? { baseUrl } : {}),
+          retryOptions: { attempts: 1 },
+        },
+      }).models.generateContent({
+        model: a.model,
+        contents: [
+          {
+            role: "user",
+            parts: [
+              { inlineData: { mimeType: image.mime, data: b64 } },
+              { text: prompt },
+            ],
+          },
+        ],
+        config: { systemInstruction: system, abortSignal: signal },
+      });
+      metrics.usage = providerUsage(p.protocol, r.usageMetadata);
+      checkGeminiCompletion(r);
+      return requireCompletedBody(r.candidates?.[0]?.content?.parts
+        ?.filter((part) => !part.thought && typeof part.text === "string")
+        .map((part) => part.text).join("") || "", r.candidates?.[0]?.finishReason === "STOP");
+    }
+    const base = (p.baseURL || "https://api.openai.com/v1").replace(/\/$/, "");
+    const res = await fetch(`${base}/chat/completions`, {
+      method: "POST",
+      signal,
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${key}`,
+      },
+      body: JSON.stringify({
+        model: a.model,
+        messages: [
+          { role: "system", content: system },
+          {
+            role: "user",
+            content: [
+              { type: "text", text: prompt },
+              {
+                type: "image_url",
+                image_url: { url: `data:${image.mime};base64,${b64}` },
+              },
+            ],
+          },
+        ],
+      }),
+    });
+    return this.responseText(res, metrics);
   }
   async generateImage(prompt: string) {
     this.charge();
@@ -614,23 +801,19 @@ export class OfficialGateway implements ModelGateway {
       const signal = AbortSignal.timeout(
         executionSettings(this.cfg).requestTimeoutSeconds * 1000,
       );
-      const image =
-        a.provider.protocol === "openai"
-          ? await this.tracked(a, "生成图片", () =>
-              this.openaiImage(a, full, signal),
-            )
-          : a.provider.protocol === "gemini"
-            ? await this.tracked(a, "生成图片", () =>
-                this.geminiImage(a, full, signal),
-              )
-            : (() => {
-                throw Error(
-                  "图片生成只支持 Gemini 协议或 OpenAI 兼容的 images/generations 接口",
-                );
-              })();
-      if (!image.data.length || image.data.length > 20_000_000)
-        throw Error("图片为空或超过 20 MB");
-      return image;
+      this.key(a);
+      if (!["openai", "gemini"].includes(a.provider.protocol))
+        throw Error("图片生成只支持 Gemini 协议或 OpenAI 兼容的 images/generations 接口");
+      return await this.tracked(a, "生成图片", () =>
+        this.measured(this.callContext(a, "generateImage", "image"), 1, async (metrics) => {
+          const image = a.provider.protocol === "openai"
+            ? await this.openaiImage(a, full, signal, metrics)
+            : await this.geminiImage(a, full, signal, metrics);
+          if (!image.data.length || image.data.length > 20_000_000)
+            throw Error("图片为空或超过 20 MB");
+          return image;
+        }),
+      );
     } catch (e) {
       throw Error(
         `图片模型调用失败：${e instanceof Error ? e.message : String(e)}`,
@@ -641,16 +824,18 @@ export class OfficialGateway implements ModelGateway {
     a: ResolvedAgent,
     prompt: string,
     signal: AbortSignal,
+    metrics: AttemptUsage,
   ) {
     const baseUrl = a.provider.baseURL || process.env.COMPETE_GEMINI_BASE_URL;
     const response = await new GoogleGenAI({
       apiKey: this.key(a),
-      ...(baseUrl ? { httpOptions: { baseUrl } } : {}),
+      httpOptions: { ...(baseUrl ? { baseUrl } : {}), retryOptions: { attempts: 1 } },
     }).models.generateContent({
       model: a.model,
       contents: prompt,
       config: { responseModalities: ["TEXT", "IMAGE"], abortSignal: signal },
     });
+    metrics.usage = providerUsage(a.provider.protocol, response.usageMetadata);
     const part = response.candidates
       ?.flatMap((c) => c.content?.parts || [])
       .find(
@@ -669,6 +854,7 @@ export class OfficialGateway implements ModelGateway {
     a: ResolvedAgent,
     prompt: string,
     signal: AbortSignal,
+    metrics: AttemptUsage,
   ) {
     const base = (a.provider.baseURL || "https://api.openai.com/v1").replace(
       /\/$/,
@@ -686,6 +872,7 @@ export class OfficialGateway implements ModelGateway {
     const json = (await res.json().catch(() => null)) as any;
     if (!res.ok)
       throw Error(`HTTP ${res.status} ${json?.error?.message || ""}`.trim());
+    metrics.usage = providerUsage(a.provider.protocol, json?.usage);
     const item = json?.data?.[0];
     if (item?.b64_json) {
       const data = Buffer.from(item.b64_json, "base64");
@@ -713,6 +900,7 @@ export class OfficialGateway implements ModelGateway {
     task: Parameters<typeof runAgentTask>[1],
   ) {
     const deadline = Date.now() + task.timeoutMs;
+    const context = this.callContext(a, task.kind === "research" ? "investigate" : "buildProject", a.name, "runtime");
     let last: unknown;
     for (let attempt = 0; attempt < 3; attempt++) {
       const remaining = deadline - Date.now();
@@ -724,11 +912,11 @@ export class OfficialGateway implements ModelGateway {
             : 8,
         );
       try {
-        return await runAgentTask(
+        return await this.measured(context, attempt + 1, () => runAgentTask(
           a,
           { ...task, timeoutMs: remaining },
           this.drivers,
-        );
+        ));
       } catch (e) {
         last = e;
         const message = e instanceof Error ? e.message : String(e);
@@ -790,14 +978,19 @@ export class OfficialGateway implements ModelGateway {
       "claude-code": ".claude-session-id",
       opencode: ".opencode-session-id",
     }[a.runtime!];
+    const base = join(this.cfg.dataDir, "jobs", this.jobId || "unbound", "agent-runtime");
+    const workspacePath = resolve(workspace);
+    const runtimeDir = join(base, Buffer.from(workspacePath).toString("hex").slice(-48));
+    await mkdir(runtimeDir, { recursive: true });
     await this.tracked(a, "编码运行时执行", () =>
       this.runLongTask(a, {
         kind: "code",
         cwd: workspace,
+        runtimeHome: join(runtimeDir, "home"),
         prompt,
         system: promptOf(this.cfg, "coder"),
-        statePath: join(workspace, state),
-        eventsPath: join(workspace, ".runtime-events.jsonl"),
+        statePath: join(runtimeDir, state),
+        eventsPath: join(runtimeDir, "events.jsonl"),
         timeoutMs: a.timeoutSeconds * 1000,
       }),
     );

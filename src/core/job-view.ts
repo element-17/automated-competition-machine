@@ -2,6 +2,7 @@ import { readFile, stat, readdir } from "node:fs/promises";
 import { join } from "node:path";
 import { z } from "zod";
 import { BrowserReport } from "../artifacts/browser-checks.js";
+import { readModelMetrics } from "./model-metrics.js";
 
 const Check = z.object({
   id: z.string(),
@@ -15,6 +16,7 @@ const Delivery = z.object({
   id: z.string().optional(),
   title: z.string().optional(),
   type: z.string(),
+  // 历史任务记录里可能有 draft/supporting_material/blocked；新流程只产出 submission。
   status: z.enum(["submission", "draft", "supporting_material", "blocked"]),
   rounds: z.number().optional(),
   artifactPaths: z.array(z.string()),
@@ -63,6 +65,33 @@ const Progress = z.object({
   budget: z.object({ used: z.number(), limit: z.number() }).optional(),
 });
 
+const LayoutReport = z.object({
+  issues: z.array(z.string()),
+  suggestions: z.array(z.string()),
+  totalPages: z.number().int().positive().nullable(),
+  checkedPages: z.array(z.number().int().positive()),
+  failedPages: z.array(z.number().int().positive()),
+  complete: z.boolean(),
+  textCoverage: z.enum(["unverified", "not_applicable"]),
+  textCoverageDetails: z.string(),
+  criteria: z.array(z.object({
+    criterion: z.number().int().nonnegative(),
+    status: z.enum(["passed", "failed", "unverified"]),
+    evidence: z.string(),
+  })).optional(),
+});
+
+const ReuseRecord = z.object({
+  taskId: z.string(), round: z.number().int().positive(), paths: z.array(z.string()), checkedAt: z.string(),
+  report: z.object({
+    status: z.enum(["clear", "review", "blocked", "unverified", "not_applicable"]),
+    checked: z.boolean(), complete: z.boolean(), reason: z.string(),
+    referenceCount: z.number(), comparedCharacters: z.number(), matchedCharacters: z.number(), coverage: z.number(),
+    matches: z.array(z.object({ referenceId: z.string(), title: z.string(), kind: z.enum(["source", "history"]), quote: z.string(), sourceQuote: z.string(), outputStart: z.number(), outputEnd: z.number() })),
+    limitations: z.array(z.string()),
+  }),
+});
+
 export type JobDelivery = z.infer<typeof Delivery>;
 export type JobView = {
   jobId: string;
@@ -72,6 +101,7 @@ export type JobView = {
   requirements: z.infer<typeof Requirement>[];
   candidates: z.infer<typeof Candidate>[];
   resume: z.infer<typeof Resume>[];
+  reuse: z.infer<typeof ReuseRecord>[];
   rounds: {
     taskId: string;
     round: number;
@@ -79,8 +109,21 @@ export type JobView = {
     review: "passed" | "failed" | "pending";
     issues: string[];
     browser?: BrowserReport;
+    layout?: z.infer<typeof LayoutReport>;
+    layoutPath?: string;
   }[];
   progress: z.infer<typeof Progress> | null;
+  modelMetrics: Awaited<ReturnType<typeof readModelMetrics>> | null;
+  quality: {
+    deliverables: number;
+    passed: number;
+    acceptanceRate: number | null;
+    savedAttempts: number;
+    reworkAttempts: number;
+    passedChecks: number;
+    failedChecks: number;
+    unverifiedChecks: number;
+  };
   counts: Record<JobDelivery["status"], number>;
   warnings: string[];
   reports: { name: string; path: string; available: boolean }[];
@@ -118,7 +161,7 @@ export async function loadJobView(
       reports.push({ name, path, available });
     }
   }
-  const [manifest, partial, requirements, candidates, resume, progress] =
+  const [manifest, partial, requirements, candidates, resume, progress, reuse] =
     await Promise.all([
       load("deliverables.json", z.object({ deliverables: z.array(Delivery) })),
       load("orchestration.json", z.record(z.string(), Delivery)),
@@ -126,6 +169,7 @@ export async function loadJobView(
       load("candidate-evidence.json", z.array(Candidate)),
       load("resume-checks.json", z.array(Resume)),
       load("runtime-progress.json", Progress),
+      load("text-reuse.json", z.array(ReuseRecord)),
     ]);
   const deliveries = manifest?.deliverables || Object.values(partial || {});
   const rounds: JobView["rounds"] = [];
@@ -148,6 +192,8 @@ export async function loadJobView(
     .slice(-100)) {
     const match = /^task-(.+)-[a-f0-9]{20}-r(\d+)-state\.json$/.exec(name)!;
     const value = await load(name, Round);
+    const layoutName = name.replace(/-state\.json$/, "-layout.json");
+    const layout = files.includes(layoutName) ? await load(layoutName, LayoutReport) : null;
     if (value)
       rounds.push({
         taskId: match[1]!,
@@ -158,8 +204,9 @@ export async function loadJobView(
             ? "passed"
             : "failed"
           : "pending",
-        issues: value.review?.issues || [],
+        issues: [...new Set([...(value.review?.issues || []), ...(layout?.issues || [])])],
         ...(value.browser ? { browser: value.browser } : {}),
+        ...(layout ? { layout, layoutPath: join(folder, layoutName) } : {}),
       });
   }
   const counts: JobView["counts"] = {
@@ -169,6 +216,31 @@ export async function loadJobView(
     blocked: 0,
   };
   for (const item of deliveries) counts[item.status]++;
+  let modelMetrics: JobView["modelMetrics"] = null;
+  const metricsPath = join(folder, "model-calls.jsonl");
+  let metricsAvailable = false;
+  try {
+    const info = await stat(metricsPath);
+    metricsAvailable = true;
+    if (!info.isFile() || info.size > 32_000_000)
+      throw Error("调用记录不是普通文件或超过 32 MB");
+    modelMetrics = await readModelMetrics(dataDir, jobId);
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code !== "ENOENT")
+      warnings.push(`模型调用统计无法读取：${e instanceof Error ? e.message : String(e)}`);
+  }
+  reports.push({ name: "model-calls.jsonl", path: metricsPath, available: metricsAvailable });
+  const checks = (requirements || []).flatMap((r) => r.checks);
+  const quality: JobView["quality"] = {
+    deliverables: deliveries.length,
+    passed: counts.submission,
+    acceptanceRate: manifest && deliveries.length ? counts.submission / deliveries.length : null,
+    savedAttempts: rounds.length,
+    reworkAttempts: rounds.filter((r) => r.round > 1).length,
+    passedChecks: checks.filter((c) => c.status === "passed").length,
+    failedChecks: checks.filter((c) => c.status === "failed").length,
+    unverifiedChecks: checks.filter((c) => c.status === "unverified").length,
+  };
   return {
     jobId,
     folder,
@@ -177,8 +249,11 @@ export async function loadJobView(
     requirements: requirements || [],
     candidates: candidates || [],
     resume: resume || [],
+    reuse: reuse || [],
     rounds,
     progress,
+    modelMetrics,
+    quality,
     counts,
     warnings,
     reports: reports.sort((a, b) => a.name.localeCompare(b.name)),
@@ -188,7 +263,7 @@ export async function loadJobView(
 export function jobViewSummary(view: JobView): string[] {
   const lines = [
     `产物记录：${view.manifest === "final" ? "已有最终清单" : view.manifest === "partial" ? "部分任务已保存，尚无最终清单" : "尚无可读取的产物清单"}`,
-    `投稿候选 ${view.counts.submission} | 草稿 ${view.counts.draft} | 辅助材料 ${view.counts.supporting_material} | 阻塞 ${view.counts.blocked}`,
+    `投稿候选 ${view.counts.submission} | 历史草稿 ${view.counts.draft} | 历史辅助材料 ${view.counts.supporting_material} | 历史阻塞 ${view.counts.blocked}`,
     "流程结束不等于作品符合全部赛事要求。",
   ];
   if (view.progress) {
@@ -208,7 +283,20 @@ export function jobViewSummary(view: JobView): string[] {
       `恢复记录：复用 ${view.resume.filter((r) => r.reused).length} 项 | 重新执行 ${view.resume.filter((r) => !r.reused).length} 项`,
     );
   if (view.rounds.length)
-    lines.push(`已保存 ${view.rounds.length} 份逐轮产物与评审记录`);
+    lines.push(`已保存 ${view.rounds.length} 份逐轮产物与评审记录，其中返工 ${view.quality.reworkAttempts} 份`);
+  if (view.quality.acceptanceRate !== null)
+    lines.push(`当前清单验收通过率：${Math.round(view.quality.acceptanceRate * 100)}%（${view.quality.passed}/${view.quality.deliverables}，不代表真实参赛成绩）`);
+  if (view.modelMetrics) {
+    const m = view.modelMetrics;
+    lines.push(
+      `模型调用：${m.calls} 次调用、${m.attempts} 次请求（含重试）；请求成功 ${m.success}、失败 ${m.failure}、未记录结果 ${m.pending}`,
+      `请求累计耗时：${(m.durationMs / 1000).toFixed(1)} 秒（并发请求累加，不是任务总时长）；token 用量有记录 ${m.usageKnownAttempts} 次、未知 ${m.usageUnknownAttempts} 次`,
+    );
+    if (m.runtime.attempts)
+      lines.push(`外部 Agent 执行：${m.runtime.attempts} 次；内部模型调用量未统计`);
+  } else lines.push("模型调用统计：无可用记录，用量未知");
+  if (view.reuse.length)
+    lines.push(`文本复用检查：${view.reuse.length} 份逐轮记录；高复用 ${view.reuse.filter((r) => r.report.status === "blocked").length}、需核查 ${view.reuse.filter((r) => r.report.status === "review" || r.report.status === "unverified").length}。这不是原创率或AI检测结果。`);
   if (view.candidates.length)
     lines.push(
       `选题：${view.candidates.length} 个候选，共 ${view.candidates.reduce((n, c) => n + c.sources.length, 0)} 条关联来源；没有证据不代表原创`,

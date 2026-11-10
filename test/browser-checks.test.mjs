@@ -84,8 +84,10 @@ test(
       assert.equal(broken.status, "failed");
       assert.match(broken.issues.join(" "), /broken-page/);
       await writeFile(artifact, html(""));
+      // 没有交互用例、没有截图，不能算通过。
       const untested = await inspectSoftware(artifact, join(dir, "none"));
-      assert.equal(untested.status, "unverified");
+      assert.equal(untested.status, "failed");
+      assert.match(untested.issues.join(" "), /用例|截图/);
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
@@ -123,6 +125,12 @@ test(
       assert.equal(report.status, "failed");
       assert.match(report.issues.join(" "), /missing.js|资源错误/);
       assert.equal(hits, 0);
+      archive.file("missing.js", "// 本地资源已补齐");
+      await writeFile(artifact, await archive.generateAsync({ type: "nodebuffer" }));
+      const dynamic = await inspectSoftware(artifact, join(dir, "dynamic"), suite);
+      assert.equal(dynamic.status, "failed");
+      assert.match(dynamic.issues.join(" "), /Content Security Policy|blocked|Refused to connect/);
+      assert.equal(hits, 0, "静态资源齐全时仍禁止运行期间访问外部服务");
     } finally {
       server.close();
       await rm(dir, { recursive: true, force: true });
@@ -130,7 +138,7 @@ test(
   },
 );
 
-test("拒绝归档越界与任意脚本步骤；浏览器缺失明确未核实", async () => {
+test("拒绝归档越界与任意脚本步骤；浏览器缺失直接判失败", async () => {
   const dir = await mkdtemp(join(tmpdir(), "browser-guard-"));
   const previous = process.env.COMPETE_BROWSER_EXECUTABLE;
   try {
@@ -159,8 +167,10 @@ test("拒绝归档越界与任意脚本步骤；浏览器缺失明确未核实",
     process.env.COMPETE_BROWSER_EXECUTABLE = join(dir, "missing.exe");
     const page = join(dir, "app.html");
     await writeFile(page, html(""));
+    // 浏览器缺失时验收必须失败，不能以“未核实”蒙混过关。
     const report = await inspectSoftware(page, join(dir, "missing"), suite);
-    assert.equal(report.status, "unverified");
+    assert.equal(report.status, "failed");
+    assert.match(report.issues.join(" "), /浏览器不可用/);
     assert.equal(report.screenshots.length, 0);
   } finally {
     if (previous === undefined) delete process.env.COMPETE_BROWSER_EXECUTABLE;

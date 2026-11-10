@@ -44,6 +44,7 @@ export type Drivers = {
 export type Task = {
   kind: "research" | "code";
   cwd: string;
+  runtimeHome?: string;
   prompt: string;
   system: string;
   statePath: string;
@@ -115,7 +116,7 @@ async function runClaude(
   const query =
     drivers.query ||
     (await loadRuntime<{ query: ClaudeQuery }>("claude-code")).query;
-  const home = task.kind === "code" ? join(task.cwd, ".claude-home") : task.cwd;
+  const home = task.runtimeHome || (task.kind === "code" ? join(task.cwd, ".claude-home") : task.cwd);
   await mkdir(home, { recursive: true });
   // 网页搜索是 Anthropic 服务端工具，只在官方接口可用；编码只允许读写工作区内文件，不给 shell。
   const tools =
@@ -186,7 +187,7 @@ async function runCodex(
   key: string,
   drivers: Drivers,
 ) {
-  const home = join(task.cwd, ".codex-home");
+  const home = task.runtimeHome || join(task.cwd, ".codex-home");
   await mkdir(home, { recursive: true });
   const env = isolatedEnv(home, { OPENAI_API_KEY: key, CODEX_HOME: home });
   // 自定义接口声明为独立的 Responses 供应商（与 cc-switch 的写法一致）；用 openai_base_url 会走内置供应商的 websocket，部分中转站会断开。

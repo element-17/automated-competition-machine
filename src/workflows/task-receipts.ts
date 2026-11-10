@@ -39,7 +39,7 @@ const Receipt = z.object({
         sha256: z.string().regex(/^[a-f0-9]{64}$/),
       }),
     )
-    .min(1),
+    .default([]),
 });
 export type TaskReceipt = z.infer<typeof Receipt>;
 
@@ -83,6 +83,7 @@ export async function createTaskReceipt(
   }
   if (new Set(files.map((f) => f.path)).size !== files.length)
     throw Error("产物路径重复");
+  if (files.length === 0) throw Error("没有实际产物，不能生成完成收据");
   return Receipt.parse({
     version: 1,
     inputHash: taskInputHash(task, context),

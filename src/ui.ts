@@ -1,7 +1,7 @@
 import * as p from "@clack/prompts";
 import pc from "picocolors";
 import Table from "cli-table3";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawn } from "node:child_process";
@@ -13,6 +13,7 @@ import {
   timeRanges,
   executionSettings,
   saveExecutionConfig,
+  configPath,
   type AppConfig,
 } from "./core/config.js";
 import {
@@ -139,11 +140,12 @@ function credentials(cfg: AppConfig) {
 const cancelled = (value: unknown) => p.isCancel(value);
 const yesno = (ready: boolean) =>
   ready ? pc.green("已配置") : pc.yellow("未配置");
+// 新流程只产出 submission；其余是旧任务的历史状态，仅用于显示。
 const deliveryLabels: Record<string, string> = {
   submission: "投稿候选",
-  draft: "草稿",
-  supporting_material: "辅助材料",
-  blocked: "阻塞",
+  draft: "历史草稿",
+  supporting_material: "历史辅助材料",
+  blocked: "历史阻塞",
 };
 const checkLabels: Record<string, string> = {
   passed: "通过",
@@ -314,6 +316,7 @@ async function inspectJob(cfg: AppConfig, store: Store, jobId?: string) {
           label: "选题证据",
           hint: `${view.candidates.length} 个候选`,
         },
+        { value: "reuse", label: "文本复用风险与重复片段", hint: `${view.reuse.length} 份检查记录` },
         { value: "resume", label: "恢复记录" },
         { value: "paths", label: "文件与报告路径" },
         { value: "refresh", label: "刷新进度" },
@@ -426,6 +429,12 @@ async function inspectJob(cfg: AppConfig, store: Store, jobId?: string) {
         view.rounds.flatMap((r) => [
           `${r.taskId} · 第 ${r.round} 轮 · ${r.review === "passed" ? "内容评审通过" : r.review === "failed" ? "需要返工" : "等待内容评审"}`,
           ...r.issues.map((x) => `  ${x}`),
+          ...(r.layout ? [
+            `  版面：${r.layout.complete ? "已检查全部页面" : "检查未完成"} | 总页数 ${r.layout.totalPages ?? "未知"} | 已检 ${r.layout.checkedPages.join("、") || "无"} | 失败 ${r.layout.failedPages.join("、") || "无"}`,
+            `  文本覆盖：${r.layout.textCoverageDetails}`,
+            ...(r.layout.criteria || []).map((c) => `  视觉标准 ${c.criterion + 1}：${checkLabels[c.status]} · ${c.evidence}`),
+            `  版面报告：${r.layoutPath}`,
+          ] : []),
           ...r.artifactPaths.map((x) => `  文件：${x}`),
         ]),
       );
@@ -442,6 +451,20 @@ async function inspectJob(cfg: AppConfig, store: Store, jobId?: string) {
             `  规则来源：${s.url}`,
             `  原文：${s.quote}`,
           ]),
+        ]),
+      );
+    else if (action === "reuse")
+      await showReportLines(
+        "文本复用风险（不是原创率或AI检测）",
+        view.reuse.flatMap((entry) => [
+          `${entry.taskId} 第 ${entry.round} 轮：${entry.report.reason}`,
+          `范围：${entry.report.referenceCount} 份参考；${entry.report.complete ? "本次比较完成" : "存在未覆盖内容"}；非排除文本匹配 ${entry.report.matchedCharacters}/${entry.report.comparedCharacters} 字符（${Math.round(entry.report.coverage * 100)}%）`,
+          ...entry.report.matches.flatMap((m) => [
+            `来源：${m.title} · ${m.referenceId}`,
+            `作品位置 ${m.outputStart}–${m.outputEnd}：${m.quote}`,
+            `来源原文：${m.sourceQuote}`,
+          ]),
+          ...entry.report.limitations.map((line) => `检查边界：${line}`),
         ]),
       );
     else if (action === "evidence")
@@ -548,6 +571,128 @@ async function executionMenu(
     "长任务设置已保存。设置本身不改写已有任务；恢复队列时若使用更大的预算，会提高任务总上限。",
   );
   return loadConfig(configPath);
+}
+
+async function profileMenu(
+  cfg: AppConfig,
+  path: string | undefined,
+): Promise<AppConfig> {
+  p.intro("用户资料");
+  const current = cfg.profile || {};
+  p.note(
+    `学校：${current.school || "未设置"}
+学院：${current.college || "未设置"}
+专业：${current.major || "未设置"}
+身份：${current.identity || "未设置"}
+姓名：${current.name || "未设置"}
+学号：${current.studentId || "未设置"}
+电话：${current.phone || "未设置"}
+邮箱：${current.email || "未设置"}
+指导教师：${current.advisor || "未设置"}
+团队名称：${current.teamName || "未设置"}`,
+    "当前设置",
+  );
+  const action = await p.select({
+    message: "操作",
+    options: [
+      { value: "edit", label: "编辑资料" },
+      { value: "clear", label: "清空资料" },
+      { value: "back", label: "返回" },
+    ],
+  });
+  if (cancelled(action) || action === "back") return cfg;
+  if (action === "clear") {
+    const file = configPath(path);
+    const raw = existsSync(file) ? JSON.parse(readFileSync(file, "utf8")) : {};
+    writeFileSync(
+      file,
+      JSON.stringify({ ...raw, profile: {} }, null, 2) + "\n",
+      "utf8",
+    );
+    p.log.success("用户资料已清空");
+    return loadConfig(path);
+  }
+  const school = await p.text({
+    message: "学校",
+    placeholder: "如：安徽理工大学",
+    defaultValue: current.school,
+  });
+  if (cancelled(school)) return cfg;
+  const college = await p.text({
+    message: "学院",
+    placeholder: "如：计算机科学与工程学院",
+    defaultValue: current.college,
+  });
+  if (cancelled(college)) return cfg;
+  const major = await p.text({
+    message: "专业",
+    placeholder: "如：软件工程",
+    defaultValue: current.major,
+  });
+  if (cancelled(major)) return cfg;
+  const identity = await p.text({
+    message: "身份",
+    placeholder: "如：本科生、研究生",
+    defaultValue: current.identity,
+  });
+  if (cancelled(identity)) return cfg;
+  const name = await p.text({
+    message: "姓名",
+    placeholder: "如：张三",
+    defaultValue: current.name,
+  });
+  if (cancelled(name)) return cfg;
+  const studentId = await p.text({
+    message: "学号",
+    placeholder: "如：2021001234",
+    defaultValue: current.studentId,
+  });
+  if (cancelled(studentId)) return cfg;
+  const phone = await p.text({
+    message: "电话",
+    placeholder: "如：13800138000",
+    defaultValue: current.phone,
+  });
+  if (cancelled(phone)) return cfg;
+  const email = await p.text({
+    message: "邮箱",
+    placeholder: "如：zhangsan@example.com",
+    defaultValue: current.email,
+  });
+  if (cancelled(email)) return cfg;
+  const advisor = await p.text({
+    message: "指导教师",
+    placeholder: "如：李老师",
+    defaultValue: current.advisor,
+  });
+  if (cancelled(advisor)) return cfg;
+  const teamName = await p.text({
+    message: "团队名称",
+    placeholder: "如：创新实验室",
+    defaultValue: current.teamName,
+  });
+  if (cancelled(teamName)) return cfg;
+  const profile = {
+    school: school.trim() || undefined,
+    college: college.trim() || undefined,
+    major: major.trim() || undefined,
+    identity: identity.trim() || undefined,
+    name: name.trim() || undefined,
+    studentId: studentId.trim() || undefined,
+    phone: phone.trim() || undefined,
+    email: email.trim() || undefined,
+    advisor: advisor.trim() || undefined,
+    teamName: teamName.trim() || undefined,
+  };
+  const file = configPath(path);
+  const raw = existsSync(file) ? JSON.parse(readFileSync(file, "utf8")) : {};
+  writeFileSync(
+    file,
+    JSON.stringify({ ...raw, profile }, null, 2) + "\n",
+    "utf8",
+  );
+  p.log.success("用户资料已保存，下次制作作品时将自动使用这些信息");
+  return loadConfig(path);
 }
 
 function overview(cfg: AppConfig, store: Store) {
@@ -2310,6 +2455,11 @@ export async function startUI(configPath?: string) {
             hint: "预算、多轮制作、研究和超时",
           },
           {
+            value: "profile",
+            label: "用户资料",
+            hint: "学校、姓名、学号等个人信息，自动填入作品",
+          },
+          {
             value: "logs",
             label: "运行日志显示",
             hint: "简洁进度或原始模型返回",
@@ -2334,6 +2484,8 @@ export async function startUI(configPath?: string) {
         else if (choice === "agents") cfg = await agentMenu(cfg, configPath);
         else if (choice === "execution")
           cfg = await executionMenu(cfg, configPath);
+        else if (choice === "profile")
+          cfg = await profileMenu(cfg, configPath);
         else if (choice === "logs") await logMenu();
         else if (choice === "doctor") doctor(cfg);
       } catch (e) {

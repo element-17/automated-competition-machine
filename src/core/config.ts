@@ -72,7 +72,15 @@ const Config = z
     profile: z
       .object({
         school: z.string().optional(),
+        college: z.string().optional(),
+        major: z.string().optional(),
         identity: z.string().optional(),
+        studentId: z.string().optional(),
+        name: z.string().optional(),
+        phone: z.string().optional(),
+        email: z.string().optional(),
+        advisor: z.string().optional(),
+        teamName: z.string().optional(),
       })
       .default({}),
     /** 覆盖各 Agent 的系统提示词；未填写的使用内置默认值。 */

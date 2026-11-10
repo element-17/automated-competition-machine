@@ -17,8 +17,12 @@ export const Idea = z.object({
   evidence_urls: z.array(z.string()).default([]),
 });
 export type Idea = z.infer<typeof Idea>;
-export type DeliverableStatus =
-  "submission" | "draft" | "supporting_material" | "blocked";
+/**
+ * 只有全部验收通过才算产出。任何不满足要求的情况都必须抛错，
+ * 不再用"草稿""辅助材料""阻塞"这类状态把失败包装成有产物。
+ * 旧任务记录里的历史状态仍可在 job-view 中读取。
+ */
+export type DeliverableStatus = "submission";
 export type DeliverableResult = {
   type: string;
   requestedFormats: string[];

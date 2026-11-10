@@ -7,6 +7,7 @@ import { load } from "cheerio";
 import JSZip from "jszip";
 import { z } from "zod";
 import type { ModelGateway } from "../core/types.js";
+import { assertArtifactResources } from "./resource-checks.js";
 
 const execFileAsync = promisify(execFile);
 export const InterfaceCopy = z.object({
@@ -73,8 +74,7 @@ export async function buildSoftware(
   await mkdir(outputFolder, { recursive: true });
   if (format === "html") {
     const $ = load(await readFile(join(workspace, "index.html"), "utf8"));
-    if ($('script[src],link[rel="stylesheet"][href]').length)
-      throw Error("HTML 存在外部依赖，不能按单个 HTML 文件交付");
+    assertArtifactResources(new Map([["index.html", Buffer.from($.html())]]), "html");
     const out = join(outputFolder, "submission.html");
     await writeFile(out, $.html(), "utf8");
     return out;
@@ -149,8 +149,7 @@ export async function makeSoftware(
     $(script).replaceWith(
       `<script>${copySource.replace(/<\/script/gi, "<\\/script")}</script>`,
     );
-    if ($("script[src],link[href]").length)
-      throw Error("HTML 存在外部依赖，不能按单个 HTML 文件交付");
+    assertArtifactResources(new Map([["index.html", Buffer.from($.html())]]), "html");
     const out = join(outputFolder, "submission.html");
     await writeFile(out, $.html(), "utf8");
     return out;

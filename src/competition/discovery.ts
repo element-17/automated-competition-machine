@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+import { isJobControlError } from "../core/job-control.js";
 import { searchSettings, type SearchSettings } from "../core/config.js";
 import type { Store } from "../core/store.js";
 import type { ModelGateway, SearchResult } from "../core/types.js";
@@ -116,57 +118,128 @@ const Screened = z.array(
   }),
 );
 export const SCREEN_RECORD = "screen:搜索结果评估";
-/** 用评审模型按批初筛标题和摘要，返回明确剔除的 URL。调用或解析失败时全部保留并记录错误，不阻断发现。 */
+// 搜索摘要具有时效性：同内容最多复用一周；失败只冷却 15 分钟，仍需正式审核。
+export const SCREEN_RECHECK_MS = 7 * 24 * 60 * 60_000;
+export const SCREEN_FAILURE_COOLDOWN_MS = 15 * 60_000;
+const ScreenEntry = z.object({
+  url: z.string(),
+  title: z.string(),
+  fingerprint: z.string().regex(/^[a-f0-9]{64}$/),
+  checkedAt: z.string(),
+  status: z.enum(["retained", "rejected", "unreviewed"]),
+  reason: z.string(),
+  recheckReason: z.string(),
+});
+type ScreenEntry = z.infer<typeof ScreenEntry>;
+const fingerprint = (r: SearchResult) =>
+  createHash("sha256")
+    .update(JSON.stringify([r.title, r.snippet].map((s) => s.replace(/\s+/g, " ").trim())))
+    .digest("hex");
+
+function screeningHistory(store: Store) {
+  const entries = new Map<string, Map<string, ScreenEntry>>(),
+    legacy = new Set<string>();
+  for (const row of store.searches(null) as { query: string; results: string }[]) {
+    if (row.query !== SCREEN_RECORD) continue;
+    try {
+      const data = JSON.parse(row.results);
+      for (const d of Array.isArray(data.dropped) ? data.dropped : []) {
+        const url = typeof d?.url === "string" ? cleanUrl(d.url) : null;
+        if (url) legacy.add(url);
+      }
+      if (data.version !== 2 || !Array.isArray(data.decisions)) continue;
+      for (const raw of data.decisions) {
+        const parsed = ScreenEntry.safeParse(raw);
+        if (!parsed.success) continue;
+        const entry = parsed.data, url = cleanUrl(entry.url);
+        if (!url || !Number.isFinite(Date.parse(entry.checkedAt))) continue;
+        const versions = entries.get(url) || new Map<string, ScreenEntry>();
+        const prior = versions.get(entry.fingerprint);
+        if (!prior || Date.parse(prior.checkedAt) <= Date.parse(entry.checkedAt))
+          versions.set(entry.fingerprint, { ...entry, url });
+        entries.set(url, versions);
+      }
+    } catch { /* 无法验证的旧记录不构成永久剔除依据。 */ }
+  }
+  return { entries, legacy };
+}
+
+/** 初筛只决定候选保留/剔除，不代表正式审核通过；失败必须明确记为未审核。 */
 export async function screenResults(
   store: Store,
   gateway: ModelGateway,
   items: SearchResult[],
   batch = 20,
 ): Promise<Set<string>> {
-  const rejected = new Set<string>(),
-    dropped: { url: string; title: string; reason: string }[] = [];
+  if (!Number.isInteger(batch) || batch < 1) throw Error("初筛批量必须为正整数");
+  const rejected = new Set<string>();
   if (!items.length) return rejected;
-  const errors: string[] = [];
-  for (let start = 0; start < items.length; start += batch) {
-    const group = items.slice(start, start + batch);
-    const prompt = `${guards.searchResults}本次时间是北京时间 ${todayChina()}。逐条判断是否可能是面向高校学生的当届或即将举办的赛事公告、报名或作品征集通知。只把明显不是的标 keep=false 并写明原因；拿不准的标 keep=true。只输出 JSON 数组，每条形如 {"i":序号,"keep":true或false,"reason":"简短原因"}，覆盖全部序号。\n${JSON.stringify(group.map((r, i) => ({ i, title: r.title, snippet: r.snippet.slice(0, 200), url: r.url })))}`;
+  const history = screeningHistory(store), now = Date.now();
+  const unique = new Map<string, SearchResult>();
+  for (const r of items) {
+    const url = cleanUrl(r.url);
+    if (url && !unique.has(url)) unique.set(url, { ...r, url });
+  }
+  const decisions: (ScreenEntry & { reused?: boolean })[] = [];
+  const pending: { item: SearchResult; entry: ScreenEntry }[] = [];
+  for (const r of unique.values()) {
+    const hash = fingerprint(r), versions = history.entries.get(r.url);
+    const prior = versions?.get(hash);
+    const age = prior ? now - Date.parse(prior.checkedAt) : Infinity;
+    const ttl = prior?.status === "unreviewed" ? SCREEN_FAILURE_COOLDOWN_MS : SCREEN_RECHECK_MS;
+    if (prior && age >= 0 && age < ttl) {
+      decisions.push({ ...prior, reused: true });
+      continue;
+    }
+    pending.push({ item: r, entry: {
+      url: r.url, title: r.title, fingerprint: hash,
+      checkedAt: new Date(now).toISOString(), status: "unreviewed",
+      reason: "初筛尚未完成，等待人工或正式审核",
+      recheckReason: prior ? "expired" : versions?.size ? "content_changed"
+        : history.legacy.has(r.url) ? "legacy_record" : "first_seen",
+    } });
+  }
+  let checked = 0, attempted = 0;
+  for (let start = 0; start < pending.length; start += batch) {
+    const group = pending.slice(start, start + batch);
+    const prompt = `${guards.searchResults}本次时间是北京时间 ${todayChina()}。逐条判断是否可能是面向高校学生的当届或即将举办的赛事公告、报名或作品征集通知。只把明显不是的标 keep=false 并写明原因；拿不准的标 keep=true。只输出 JSON 数组，每条形如 {"i":序号,"keep":true或false,"reason":"简短原因"}，覆盖全部序号。\n${JSON.stringify(group.map(({ item: r }, i) => ({ i, title: r.title, snippet: r.snippet.slice(0, 200), url: r.url })))}`;
+    attempted += group.length;
     try {
       const verdicts = Screened.parse(
         parseJSON(await gateway.generate("reviewer", prompt, "screener")),
       );
+      if (verdicts.length !== group.length || new Set(verdicts.map((v) => v.i)).size !== group.length ||
+          verdicts.some((v) => v.i < 0 || v.i >= group.length))
+        throw Error("初筛结果未完整且唯一地覆盖全部序号");
       for (const v of verdicts) {
-        const r = group[v.i];
-        if (r && !v.keep && !rejected.has(r.url)) {
-          rejected.add(r.url);
-          dropped.push({ url: r.url, title: r.title, reason: v.reason });
-        }
+        const entry = group[v.i]!.entry;
+        entry.status = v.keep ? "retained" : "rejected";
+        entry.reason = v.reason || (v.keep ? "保留候选，仍需正式审核" : "模型剔除，未说明理由");
+        entry.checkedAt = new Date().toISOString();
       }
+      checked += group.length;
     } catch (e) {
-      errors.push(e instanceof Error ? e.message : String(e));
-      if (/调用失败|API_KEY|预算/.test(errors.at(-1)!)) break;
+      if (isJobControlError(e)) throw e;
+      const error = e instanceof Error ? e.message : String(e);
+      for (const { entry } of group) entry.reason = `初筛失败，未审核：${error}`;
+      if (/调用失败|API_KEY|预算/.test(error)) {
+        for (const { entry } of pending.slice(start + batch))
+          entry.reason = `初筛未执行，未审核：${error}`;
+        break;
+      }
     }
   }
+  decisions.push(...pending.map(({ entry }) => entry));
+  const dropped = decisions.filter((d) => d.status === "rejected");
+  const unreviewed = decisions.filter((d) => d.status === "unreviewed");
+  for (const d of dropped) rejected.add(d.url);
   store.search(
-    null,
-    SCREEN_RECORD,
-    { checked: items.length, dropped },
-    errors.length ? `评估失败，相关结果已全部保留：${errors[0]}` : null,
+    null, SCREEN_RECORD,
+    { version: 2, checked, attempted, reused: decisions.filter((d) => d.reused).length,
+      decisions, dropped, unreviewed },
+    unreviewed.length ? `初筛未完成，${unreviewed.length} 条仅保留为未审核候选，不能视为通过：${unreviewed[0]!.reason}` : null,
   );
   return rejected;
-}
-
-function previouslyDropped(store: Store) {
-  const urls = new Set<string>();
-  for (const x of store.searches(null) as { query: string; results: string }[])
-    if (x.query === SCREEN_RECORD) {
-      try {
-        for (const d of (JSON.parse(x.results).dropped || []) as {
-          url: string;
-        }[])
-          urls.add(d.url);
-      } catch {}
-    }
-  return urls;
 }
 
 export const siteOf = (url: string) => {
@@ -237,18 +310,16 @@ export async function discoverCompetitions(
     const k = competitionKey(c.title);
     if (k && !keys.has(k)) keys.set(k, c.url);
   }
-  // 之前评估剔除过的 URL 直接跳过，不重复花费调用。
+  // 同 URL 本次只初筛一次；历史决定仅在指纹匹配且未到期时复用。
   if (settings.screen) {
-    const rejected = previouslyDropped(store),
-      fresh = new Map<string, SearchResult>();
+    const fresh = new Map<string, SearchResult>();
     for (const list of lists)
       for (const r of list) {
         const url = cleanUrl(r.url);
-        if (url && !known.has(url) && !rejected.has(url) && !fresh.has(url))
+        if (url && !known.has(url) && !fresh.has(url))
           fresh.set(url, { ...r, url });
       }
-    for (const url of await screenResults(store, gateway, [...fresh.values()]))
-      rejected.add(url);
+    const rejected = await screenResults(store, gateway, [...fresh.values()]);
     if (rejected.size)
       lists = lists.map((list) =>
         list.filter((r) => !rejected.has(cleanUrl(r.url) || "")),
