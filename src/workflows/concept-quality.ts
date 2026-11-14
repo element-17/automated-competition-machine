@@ -24,15 +24,29 @@ export function conceptRoutes(brief: Brief): readonly string[] {
 }
 
 const text = z.string().trim().min(1);
+/** 模型偶尔把数组字段写成一段文本：按换行/分号拆开即可，语义无损；其余类型原样交 zod 判定。 */
+const arrayish = z.preprocess(
+  (v) => {
+    if (typeof v === "string") {
+      const items = v
+        .split(/\r?\n|；|;/)
+        .map((x) => x.trim())
+        .filter(Boolean);
+      return items;
+    }
+    return v;
+  },
+  z.array(text).optional(),
+);
 /** 可选写作方向；兼容旧字段，但不是必须逐条证明或逐字复述的合同。 */
 export const Strategy = z.object({
   problem: text.optional(),
   audience: text.optional(),
   mechanism: text.optional(),
-  differentiators: z.array(text).optional(),
-  tradeoffs: z.array(text).optional(),
-  validation: z.array(text).optional(),
-  evidenceLimits: z.array(text).optional(),
+  differentiators: arrayish,
+  tradeoffs: arrayish,
+  validation: arrayish,
+  evidenceLimits: arrayish,
 });
 export type Choice = {
   selected: number;

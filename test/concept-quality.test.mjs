@@ -65,3 +65,25 @@ test("非技术作品使用创作语境路线，不强塞技术验证", () => {
   assert.doesNotMatch(routes.join(" "), /基线|消融|算法/);
   assert.match(conceptRoutes({ title: "校园服务创新", deliverables: [] })[0], /真实使用者痛点/);
 });
+
+test("策略数组字段被模型写成一段文本时按换行/分号拆分接受", () => {
+  const parsed = ConceptReview.parse({
+    selected: 1,
+    analysis: "适合进入创作",
+    strategy: {
+      problem: "核心问题",
+      differentiators: "特色一；特色二",
+      tradeoffs: "取舍一\n取舍二",
+      validation: "",
+    },
+  });
+  assert.deepEqual(parsed.strategy.differentiators, ["特色一", "特色二"]);
+  assert.deepEqual(parsed.strategy.tradeoffs, ["取舍一", "取舍二"]);
+  assert.deepEqual(parsed.strategy.validation, []);
+  const rejected = ConceptReview.safeParse({
+    selected: 1,
+    analysis: "适合进入创作",
+    strategy: { evidenceLimits: 42 },
+  });
+  assert.equal(rejected.success, false, "非字符串类型仍交给 zod 拒绝");
+});
