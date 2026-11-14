@@ -495,6 +495,16 @@ function documentGateway(
         if (reviewError) throw Error("评审服务离线");
         return reviewJSON(prompt, review);
       }
+      if (prompt.includes("排版参考稿")) {
+        calls.writes++;
+        return JSON.stringify({
+          kind: "text",
+          title: "排版参考稿",
+          text: "排版参考稿正文，供用户誊写对照",
+          sources: [],
+          needs_input: [],
+        });
+      }
       if (prompt.includes("直接创作")) {
         calls.writes++;
         return JSON.stringify({
@@ -2149,7 +2159,58 @@ test("官方模板格式无法保留时快速失败，不空耗制作轮次", as
       runOrchestration(c.cfg, c.store, g, { jobId: c.job, competitionId: c.id, idea }),
       (e) => /无法自动保留/.test(e.message) && !/制作失败/.test(e.message),
     );
-    assert.equal(g.calls.writes, 0, "确定性阻塞不应进入制作调用");
+    // 手写原件类：快速失败前生成排版参考稿与风险点声明，不进入正式制作返工
+    assert.equal(g.calls.writes, 1);
+    assert.ok(c.store.artifacts(c.job).some((a) => a.kind === "risk-note"));
+  } finally {
+    await c.done();
+  }
+});
+
+test("官方要求本人手写原件时生成排版参考稿与风险点声明，不伪造扫描件", async () => {
+  const d = item("亲笔手写作品扫描件", ["pdf"]);
+  const c = await setup(brief([d]));
+  const calls = { writes: 0, plans: 0 };
+  const g = {
+    search: async () => [],
+    inspectImage: async (prompt) => reviewJSON(prompt, { issues: [], suggestions: [] }),
+    generate: async (role, prompt) => {
+      if (prompt.includes("拆解成可以实际制作的文件任务")) {
+        calls.plans++;
+        return JSON.stringify({
+          tasks: [
+            documentTask({
+              format: "pdf",
+              title: "亲笔手写作品扫描件",
+              instructions: "本人手写完成后扫描提交，保持手写原件风貌",
+            }),
+          ],
+          packages: [],
+          notes: [],
+        });
+      }
+      if (prompt.includes("排版参考稿")) {
+        calls.writes++;
+        return JSON.stringify({
+          kind: "text",
+          title: "排版参考稿",
+          text: "排版参考稿正文，供用户誊写对照",
+          sources: [],
+          needs_input: ["官方要求本人手写完成后扫描并替换本稿"],
+        });
+      }
+      throw Error("unexpected prompt: " + prompt.slice(0, 80));
+    },
+  };
+  try {
+    await assert.rejects(
+      runOrchestration(c.cfg, c.store, g, { jobId: c.job, competitionId: c.id, idea }),
+      (e) => /本人手写.*排版参考稿|排版参考稿.*本人手写/s.test(e.message) && !/制作失败/.test(e.message),
+    );
+    assert.equal(calls.writes, 1, "只生成一份排版参考稿，不伪造扫描件");
+    const artifacts = c.store.artifacts(c.job);
+    assert.ok(artifacts.some((a) => a.kind === "risk-note"), "风险点声明已登记");
+    assert.ok(artifacts.some((a) => a.kind === "reference-draft"), "排版参考稿已登记");
   } finally {
     await c.done();
   }

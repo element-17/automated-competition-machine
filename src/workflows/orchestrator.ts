@@ -17,7 +17,7 @@ import {
   cp,
   lstat,
 } from "node:fs/promises";
-import { join, dirname, extname } from "node:path";
+import { basename, join, dirname, extname } from "node:path";
 import JSZip from "jszip";
 import { z } from "zod";
 import type { AppConfig } from "../core/config.js";
@@ -121,7 +121,9 @@ const Original = z.object({
 const message = (e: unknown) => (e instanceof Error ? e.message : String(e));
 /** 预算耗尽或模型接口失败时中止任务，保留检查点，修复后可恢复；其余错误在任务内处理。 */
 const fatal = (m: string) => /预算|上限|调用失败/.test(errorHead(m));
-class Blocked extends Error {}
+class Blocked extends Error {
+  detail?: { draftPath?: string };
+}
 
 /** 无固定作品模板：优先使用比赛指定的可制作格式；其余显式列入缺口。 */
 export function deliveryFormat(
@@ -686,6 +688,110 @@ async function fillTemplate(
   };
 }
 
+/** 官方要求本人手写/亲笔原件的语义特征；命中时机器只做排版参考稿，不伪造扫描件。 */
+const humanOriginal =
+  /手写原件|亲笔|誊抄|手写[\s\S]{0,10}(?:扫描|拍照)|(?:扫描|拍照)[\s\S]{0,10}手写|扫描页|扫描件/;
+function requiresHumanOriginal(ctx: Ctx, task: PlanTask): boolean {
+  const item = ctx.brief.deliverables[task.deliverable];
+  return (
+    task.kind === "document" &&
+    humanOriginal.test(
+      [task.title, task.instructions, item?.type || "", ...task.acceptance].join(
+        "\n",
+      ),
+    )
+  );
+}
+/** 排版参考稿：内容按任务要求组织，供用户誊写或对照替换；不模仿手写、不代写。 */
+async function referenceDraft(
+  ctx: Ctx,
+  task: PlanTask,
+  round: number,
+  feedback: string[],
+): Promise<string> {
+  const item = ctx.brief.deliverables[task.deliverable];
+  const prompt = `${Guard}\n该交付物官方要求用户本人手写/亲笔完成后扫描提交，机器不能伪造手写内容、手写风格或扫描件。请输出 JSON {"kind":"text","title":"排版参考稿","text":"完整参考稿正文","sources":[],"needs_input":["官方要求本人手写完成后扫描并替换本稿"]}。生成一份排版参考稿：按任务要求组织标题、正文结构与署名位置，供用户照此誊写或对照替换；不模仿手写风格，不添加印章、签名图样，不声称是官方要求的手写原件。缺少的真实资料列入 needs_input，不编造。${profileNote(ctx.cfg.profile)}${strategyPrompt(ctx.selection, task.kind)}${feedback.length ? `返工意见（仅调整参考稿内容，不改变其性质）：${JSON.stringify(feedback)}` : ""}\n任务：${JSON.stringify(task)}\n交付物：${JSON.stringify(item || null)}\n规则：${JSON.stringify(ctx.brief)}\n选题：${JSON.stringify(ctx.idea)}\n证据：${JSON.stringify(ctx.evidence.slice(0, 12).map((e) => ({ ...e, text: e.text.slice(0, 2000) })))}\n比赛提供的原文：${JSON.stringify(ctx.sourceText)}`;
+  const work = Work.parse(
+    parseJSON(await ctx.gateway.generate("writer", prompt)),
+  );
+  work.title = applyProfile(work.title, ctx.cfg.profile);
+  if (work.text) work.text = applyProfile(work.text, ctx.cfg.profile);
+  work.needs_input = work.needs_input.filter((x) =>
+    coveredByProfile(x, ctx.cfg.profile),
+  );
+  const path = await renderWork(
+    work,
+    "docx",
+    taskFolder(ctx, task, round),
+    `排版参考稿-${task.id}`,
+  );
+  ctx.store.artifact(ctx.jobId, "reference-draft", path, modelLabel(ctx.cfg, "writer"));
+  return path;
+}
+/** 风险点声明：说明机器产物与官方要求的差距、风险点和用户提交前必办事项；不属于提交件。 */
+async function writeRiskNote(
+  ctx: Ctx,
+  task: PlanTask,
+  reason: string,
+  draftPath?: string | null,
+): Promise<string> {
+  const item = ctx.brief.deliverables[task.deliverable];
+  const manual = requiresHumanOriginal(ctx, task);
+  const risks = [
+    "本声明与所附参考稿均由机器生成，不属于官方要求的提交件，不得直接作为作品提交。",
+    manual
+      ? "官方要求本人手写/亲笔完成原件；参考稿仅供誊写对照，誊写必须由用户本人完成，不得由他人或 AI 代写。"
+      : "官方要求使用官方模板/保留官方版式；参考稿无法保证与官方模板一致。",
+    `交付格式差异：参考稿为 docx，官方要求 ${item?.formats.join("/") || "未明确"}。`,
+    "参考稿内容基于给定资料与用户资料生成，誊写或替换前请逐项核对事实与个人信息的准确性。",
+    `触发原因：${reason}`,
+  ];
+  const todos = manual
+    ? [
+        "按官方要求在官方翻译纸/原件上本人手写完成内容",
+        "扫描或拍照生成官方要求的最终文件（按官方命名规则）",
+        "用最终文件替换参考稿后再提交",
+      ]
+    : [
+        "从官方渠道获取官方模板/格式要求并导入（compete materials）",
+        "按官方模板重新排版或填写后提交",
+      ];
+  const lines = [
+    `# 风险点声明：${task.title}`,
+    "本文件由系统自动生成，用于说明本次产物与官方要求的差距。它不属于提交件，请勿提交给主办方。",
+    "## 官方要求",
+    `- 交付格式：${item?.formats.join("/") || "未明确"}`,
+    ...(item?.official_template ? [`- 官方模板：${item.official_template}`] : []),
+    "## 机器产出的参考稿",
+    draftPath
+      ? `- 排版参考稿：${basename(draftPath)}（供誊写对照或替换，不是官方要求的手写/模板原件）`
+      : "- 本次未生成参考稿",
+    "## 风险点",
+    ...risks.map((r, i) => `${i + 1}. ${r}`),
+    "## 提交前你必须完成",
+    ...todos.map((t, i) => `${i + 1}. ${t}`),
+  ].join("\n\n");
+  return renderWork(
+    Work.parse({ kind: "text", title: `风险点声明：${task.title}`, text: lines, sources: [] }),
+    "docx",
+    join(jobDir(ctx), "risk"),
+    `风险点声明-${task.id}`,
+  );
+}
+/** 手写原件类交付物：生成参考稿后明确失败，等待用户补齐真实原件。 */
+async function humanOriginalBlock(
+  ctx: Ctx,
+  task: PlanTask,
+  round: number,
+  feedback: string[],
+): Promise<never> {
+  const draftPath = await referenceDraft(ctx, task, round, feedback);
+  const err = new Blocked(
+    `该交付物官方要求用户本人手写/亲笔完成，机器不能伪造手写内容或扫描件；已生成排版参考稿 ${basename(draftPath)} 供誊写对照，风险点声明见任务产物`,
+  );
+  err.detail = { draftPath };
+  throw err;
+}
 /** 制作要求和验收标准里的目标字数（取最大的下限），如”8000–12000字””不少于1.5万字”。没有明确要求时返回 10000 作为合理默认值。 */
 export function targetLength(task: {
   instructions: string;
@@ -1125,6 +1231,9 @@ async function produce(
       task.kind === "spreadsheet")
   )
     return fillTemplate(ctx, task, template, round, feedback);
+  // 官方要求本人手写/亲笔原件的交付物：机器不伪造扫描件，只生成排版参考稿与风险点声明。
+  if (task.kind === "document" && requiresHumanOriginal(ctx, task))
+    await humanOriginalBlock(ctx, task, round, feedback);
   if (task.kind === "image") return drawImage(ctx, task, round, feedback);
   if (task.kind === "software") return buildApp(ctx, task, round, feedback);
   return writeWork(ctx, task, round, feedback);
@@ -1722,8 +1831,28 @@ export async function runTask(ctx: Ctx, task: PlanTask): Promise<TaskResult> {
       }
       if (isJobControlError(e) || budgetError(m) || fatal(m)) throw e;
       // Blocked 是确定性阻塞（官方模板无法保留/无法定位字段等）：重试不可能改变结果，
-      // 直接失败并给出原因，不空耗制作轮次。
-      if (e instanceof Blocked) throw e;
+      // 不空耗制作轮次。终止前生成排版参考稿（手写原件类）与风险点声明，写清差距和必办事项。
+      if (e instanceof Blocked) {
+        const draftPath =
+          e.detail?.draftPath ||
+          (requiresHumanOriginal(ctx, task)
+            ? await referenceDraft(ctx, task, round, feedback).catch(() => null)
+            : null);
+        const notePath = await writeRiskNote(ctx, task, m, draftPath).catch(
+          () => null,
+        );
+        if (notePath)
+          ctx.store.artifact(ctx.jobId, "risk-note", notePath, null);
+        await record(
+          ctx.cfg,
+          ctx.store,
+          ctx.jobId,
+          `${taskKey(ctx, task)}-risk.json`,
+          { reason: m, draftPath, notePath },
+          null,
+        ).catch(() => {});
+        throw e;
+      }
       // 返工轮里其他失败仍然交给下一轮；最后一轮还失败就直接抛错，不保留“看起来完成了”的草稿。
       if (round === rounds - 1)
         throw Error(
