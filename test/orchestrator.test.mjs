@@ -2138,3 +2138,19 @@ test("规划里只有真正的硬缺口才交给用户确认", async () => {
     await ctx.done();
   }
 });
+
+test("官方模板格式无法保留时快速失败，不空耗制作轮次", async () => {
+  const d = item("手写件扫描PDF", ["pdf"]);
+  d.official_template = "https://example.org/template.pdf";
+  const c = await setup(brief([d]));
+  const g = documentGateway({ tasks: [documentTask({ format: "pdf" })] });
+  try {
+    await assert.rejects(
+      runOrchestration(c.cfg, c.store, g, { jobId: c.job, competitionId: c.id, idea }),
+      (e) => /无法自动保留/.test(e.message) && !/制作失败/.test(e.message),
+    );
+    assert.equal(g.calls.writes, 0, "确定性阻塞不应进入制作调用");
+  } finally {
+    await c.done();
+  }
+});

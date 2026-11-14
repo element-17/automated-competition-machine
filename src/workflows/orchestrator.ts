@@ -1721,6 +1721,9 @@ export async function runTask(ctx: Ctx, task: PlanTask): Promise<TaskResult> {
         continue;
       }
       if (isJobControlError(e) || budgetError(m) || fatal(m)) throw e;
+      // Blocked 是确定性阻塞（官方模板无法保留/无法定位字段等）：重试不可能改变结果，
+      // 直接失败并给出原因，不空耗制作轮次。
+      if (e instanceof Blocked) throw e;
       // 返工轮里其他失败仍然交给下一轮；最后一轮还失败就直接抛错，不保留“看起来完成了”的草稿。
       if (round === rounds - 1)
         throw Error(
