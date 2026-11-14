@@ -87,7 +87,14 @@ export async function auditTextReuse(input: ReuseAuditInput): Promise<TextReuseR
       }
       seen.add(digest); characters += ref.text.length; references.push(ref);
     };
-    for (const e of input.evidence) add({ id: `source:${e.url}`, title: e.title, text: e.text, kind: "source" });
+    // 同一页面会在资格审核、研究等阶段多次入库，id 以 URL 为准：只保留正文最长的一条，
+    // 否则 assessTextReuse 会因参考 id 重复而中止整个任务。
+    const sourceEvidence = new Map<string, { url: string; title: string; text: string }>();
+    for (const e of input.evidence) {
+      const prev = sourceEvidence.get(e.url);
+      if (!prev || e.text.length > prev.text.length) sourceEvidence.set(e.url, e);
+    }
+    for (const e of sourceEvidence.values()) add({ id: `source:${e.url}`, title: e.title, text: e.text, kind: "source" });
     const history = store.recentSubmissionArtifacts(jobId, 21);
     if (history.length > 20) { complete = false; limitations.push("本地历史仅比较最近20个交付文件，较早文件未扫描"); }
     for (const previous of history.slice(0, 20)) {
