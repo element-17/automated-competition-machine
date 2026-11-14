@@ -700,14 +700,14 @@ function overview(cfg: AppConfig, store: Store) {
     auth = credentials(cfg);
   p.note(
     [
-      `待审核 ${count.candidate}  |  等待处理 ${count.queued}  |  处理中 ${count.processing}  |  完成 ${count.completed}  |  中断 ${count.failed}  |  暂停 ${count.paused}  |  停止 ${count.stopped}`,
-      `审核：未审核 ${count.unreviewed}  |  通过 ${count.valid}  |  待确认 ${count.needs_review}  |  无效 ${count.invalid}`,
+      `寻找/待审核 ${count.candidate}  |  人工审核 ${count.needs_review}  |  处理队列：等待 ${count.queued} / 处理中 ${count.processing}  |  完成 ${count.completed}  |  中断 ${count.failed}  |  暂停 ${count.paused}  |  停止 ${count.stopped}`,
+      `审核结果：未审核 ${count.unreviewed}  |  通过 ${count.valid}  |  待确认 ${count.needs_review}  |  无效 ${count.invalid}`,
       `写作 ${modelLabel(cfg, "writer")}：${yesno(auth.writer)}  |  评审 ${modelLabel(cfg, "reviewer")}：${yesno(auth.reviewer)}  |  ${cfg.search.provider === "sources" ? "高校来源列表" : "搜索"}：${yesno(auth.search)}`,
       cfg.search.provider === "sources"
         ? "当前仅扫描配置的高校来源列表，不支持全网关键词搜索。"
         : "凭据状态仅表示已配置，不能证明可用。",
     ].join("\n"),
-    "赛事队列",
+    "赛事队列（寻找 → 审核 → 处理）",
   );
 }
 /** 查看队列时直接进入赛事操作，避免用户先返回主菜单再找修改和移除。 */
@@ -768,18 +768,26 @@ function printQueuePage(
     `第 ${current}/${pages} 页${search ? `，筛选：${search}` : ""}（${count} 条）`,
   );
 }
-async function selectEntry(store: Store, message: string) {
+async function selectEntry(
+  store: Store,
+  message: string,
+  opts?: { reviewStatus?: string },
+) {
   const pageSize = queuePageSize(),
-    total = store.queueCount();
+    total = store.queueCount(undefined, opts?.reviewStatus);
   if (!total) {
-    p.log.info("队列为空。");
+    p.log.info(
+      opts?.reviewStatus === "needs_review"
+        ? "人工审核队列是空的；自动审核标记为待确认的赛事会出现在这里。"
+        : "队列为空。",
+    );
     return null;
   }
   let search = "",
     offset = 0;
   while (true) {
-    const count = store.queueCount(search),
-      page = store.queuePage(pageSize, offset, search) as Entry[];
+    const count = store.queueCount(search, opts?.reviewStatus),
+      page = store.queuePage(pageSize, offset, search, opts?.reviewStatus) as Entry[];
     if (!page.length) {
       offset = Math.max(0, offset - pageSize);
       continue;
@@ -841,7 +849,7 @@ async function selectEntry(store: Store, message: string) {
       });
       if (cancelled(query)) return null;
       const text = query.trim();
-      if (text && store.queueCount(text) === 0) {
+      if (text && store.queueCount(text, opts?.reviewStatus) === 0) {
         p.log.warn("没有匹配的赛事。");
         continue;
       }
@@ -957,29 +965,44 @@ async function remove(store: Store, item?: Entry | null) {
   store.deleteQueue(item.competitionId);
   p.log.success("已从队列移除。");
 }
+/** 人工审核队列：自动审核标记为待确认的赛事在这里逐场处理；通过→处理队列，无效→丢弃候选。 */
 async function manual(store: Store) {
-  const item = await selectEntry(store, "选择要人工确认的赛事");
-  if (!item) return;
-  const decision = await p.select({
-    message: "设置审核结果",
-    options: [
-      { value: "valid", label: "通过", hint: "允许进入制作" },
-      { value: "invalid", label: "无效", hint: "保留在队列，不处理" },
-      { value: "needs_review", label: "待确认" },
-    ],
-  });
-  if (cancelled(decision)) return;
-  const reason = await p.text({
-    message: "填写判断理由",
-    validate: (v) => (v?.trim() ? undefined : "请填写理由"),
-  });
-  if (cancelled(reason)) return;
-  store.setQueueReview(item.competitionId, {
-    decision: decision as "valid" | "invalid" | "needs_review",
-    reason: reason.trim(),
-    reviewer: "manual",
-  });
-  p.log.success("人工审核结果已保存。");
+  while (true) {
+    const item = await selectEntry(store, "人工审核队列", {
+      reviewStatus: "needs_review",
+    });
+    if (!item) return;
+    const decision = await p.select({
+      message: `审核结果：${item.title}`,
+      options: [
+        { value: "valid", label: "通过", hint: "进入处理队列，等待制作作品" },
+        {
+          value: "invalid",
+          label: "无效",
+          hint: "候选直接丢弃；已入处理队列的保留但不再处理",
+        },
+        { value: "needs_review", label: "继续待确认" },
+      ],
+    });
+    if (cancelled(decision)) return;
+    const reason = await p.text({
+      message: "填写判断理由",
+      validate: (v) => (v?.trim() ? undefined : "请填写理由"),
+    });
+    if (cancelled(reason)) return;
+    store.setQueueReview(item.competitionId, {
+      decision: decision as "valid" | "invalid" | "needs_review",
+      reason: reason.trim(),
+      reviewer: "manual",
+    });
+    p.log.success(
+      decision === "valid"
+        ? "已通过；赛事进入处理队列。"
+        : decision === "invalid"
+          ? "已标记无效；候选已从队列丢弃。"
+          : "已保存，赛事留在人工审核队列。",
+    );
+  }
 }
 const progressLog = (event: GatewayProgress) => {
   const detail = [
@@ -2434,9 +2457,9 @@ export async function startUI(configPath?: string) {
             label: "任务进度与验收",
             hint: "轮次、作品、证据、规则和恢复记录",
           },
-          { value: "review", label: "自动审核队列" },
+          { value: "review", label: "自动审核候选", hint: "审核 Agent 逐场核实资格；通过进入处理队列，无效丢弃" },
           { value: "recheck", label: "重新审核一场赛事" },
-          { value: "manual", label: "人工确认审核结果" },
+          { value: "manual", label: "人工审核队列", hint: "待人工确认的赛事；通过进入处理队列，无效丢弃" },
           { value: "work", label: "处理队列", hint: "审核后逐场研究并制作" },
           { value: "retry", label: "重试失败赛事" },
           {

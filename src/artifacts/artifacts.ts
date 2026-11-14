@@ -1,7 +1,9 @@
 import { z } from "zod";
-import { mkdir, writeFile, readFile } from "node:fs/promises";
+import { mkdir, writeFile, readFile, rm } from "node:fs/promises";
 import { createWriteStream, existsSync } from "node:fs";
 import { join } from "node:path";
+import { runOfficecli } from "./officecli.js";
+import { readXlsx } from "./xlsx.js";
 import {
   AlignmentType,
   Document,
@@ -45,12 +47,18 @@ export const Slide = z.object({
   background: color.default("FFFFFF"),
   elements: z.array(Element).min(1).max(30),
 });
+/** 工作表：第一行约定为表头行；单元格一律字符串，公式由禁用规则挡在 validateWork。 */
+export const Sheet = z.object({
+  name: z.string().trim().min(1).max(60),
+  rows: z.array(z.array(z.string().max(2000)).max(40)).min(1).max(1000),
+});
 export const Work = z
   .object({
-    kind: z.enum(["text", "slides"]),
+    kind: z.enum(["text", "slides", "spreadsheet"]),
     title: z.string().min(1),
     text: z.string().optional(),
     slides: z.array(Slide).max(40).optional(),
+    sheets: z.array(Sheet).max(8).optional(),
     sources: z.array(z.string()).default([]),
     needs_input: z.array(z.string()).default([]),
   })
@@ -59,6 +67,8 @@ export const Work = z
       ctx.addIssue({ code: "custom", message: "文字作品为空" });
     if (x.kind === "slides" && !x.slides?.length)
       ctx.addIssue({ code: "custom", message: "PPT 没有幻灯片" });
+    if (x.kind === "spreadsheet" && !x.sheets?.length)
+      ctx.addIssue({ code: "custom", message: "工作簿没有工作表" });
   });
 export type Work = z.infer<typeof Work>;
 export function validateWork(
@@ -98,6 +108,24 @@ export function validateWork(
         }
       }
     }
+  if (work.kind === "spreadsheet") {
+    const names = new Set<string>();
+    for (const [i, sheet] of (work.sheets || []).entries()) {
+      if (/[\\/?*[\]:]/.test(sheet.name))
+        issues.push(`工作表 ${i + 1} 名称含 Excel 不允许的字符：${sheet.name}`);
+      if (names.has(sheet.name))
+        issues.push(`工作表名称重复：${sheet.name}`);
+      names.add(sheet.name);
+      if (sheet.rows.every((row) => row.every((cell) => !cell.trim())))
+        issues.push(`工作表 ${sheet.name} 没有任何内容`);
+      for (const [r, row] of sheet.rows.entries())
+        for (const [c, cell] of row.entries())
+          if (cell.trim().startsWith("="))
+            issues.push(
+              `工作表 ${sheet.name} 第 ${r + 1} 行第 ${c + 1} 列以 = 开头；本系统只交付数据单元格，不写公式`,
+            );
+    }
+  }
   return issues;
 }
 /** 行内 **加粗** 转为 Word 文本片段。 */
@@ -184,6 +212,82 @@ async function slideImage(path: string) {
     .toBuffer();
   return `data:image/jpeg;base64,${data.toString("base64")}`;
 }
+/** 列号转 Excel 列字母（0 起始）：0→A，25→Z，26→AA。 */
+const colLetter = (index: number): string => {
+  let n = index + 1,
+    out = "";
+  while (n > 0) {
+    const rem = (n - 1) % 26;
+    out = String.fromCharCode(65 + rem) + out;
+    n = Math.floor((n - 1) / 26);
+  }
+  return out;
+};
+/** officecli 可能把纯数字写成数值单元格，回读比对时按数值宽限。 */
+const sameCell = (a: string, b: string): boolean =>
+  a === b ||
+  (a.trim() !== "" &&
+    b.trim() !== "" &&
+    Number.isFinite(Number(a)) &&
+    Number.isFinite(Number(b)) &&
+    Number(a) === Number(b));
+
+/** 用 officecli 真实创建 OOXML 工作簿；关闭驻留进程后逐格回读核对，不靠命令自述。 */
+async function renderSpreadsheet(work: Work, out: string): Promise<string> {
+  const sheets = work.sheets!;
+  const commands: Record<string, unknown>[] = [];
+  for (const [i, sheet] of sheets.entries()) {
+    commands.push(
+      i === 0
+        ? { command: "set", path: "/Sheet1", props: { name: sheet.name } }
+        : {
+            command: "add",
+            parent: "/",
+            type: "sheet",
+            props: { name: sheet.name },
+          },
+    );
+    for (const [r, row] of sheet.rows.entries())
+      for (const [c, value] of row.entries())
+        if (value !== "")
+          commands.push({
+            command: "set",
+            path: `/${sheet.name}/${colLetter(c)}${r + 1}`,
+            props: { value, ...(r === 0 ? { bold: "true" } : {}) },
+          });
+  }
+  const batchFile = `${out}.batch.json`;
+  await writeFile(batchFile, JSON.stringify(commands), "utf8");
+  try {
+    await runOfficecli(["create", out], 60_000);
+    await runOfficecli(["batch", out, "--input", batchFile], 300_000);
+    await runOfficecli(["validate", out], 60_000);
+    await runOfficecli(["close", out], 60_000).catch(() => {});
+    const written = await readXlsx(await readFile(out));
+    const missing: string[] = [];
+    for (const [i, sheet] of sheets.entries()) {
+      const actual = written.sheets[i];
+      if (!actual) {
+        missing.push(`工作表 ${sheet.name} 缺失`);
+        continue;
+      }
+      for (const [r, row] of sheet.rows.entries())
+        for (const [c, value] of row.entries())
+          if (
+            value !== "" &&
+            !sameCell(actual.rows[r]?.[c] ?? "", value)
+          )
+            missing.push(
+              `${sheet.name} ${colLetter(c)}${r + 1}：应为 ${value}，实际 ${actual.rows[r]?.[c] ?? "（空）"}`,
+            );
+    }
+    if (missing.length)
+      throw Error(`工作簿回读核对不一致：${missing.slice(0, 8).join("；")}`);
+    return out;
+  } finally {
+    await rm(batchFile, { force: true }).catch(() => {});
+  }
+}
 export async function renderWork(
   work: Work,
   format: string,
@@ -194,7 +298,11 @@ export async function renderWork(
   await mkdir(folder, { recursive: true });
   const ext = format.toLowerCase().replace(/^\./, "");
   const allowed =
-    work.kind === "slides" ? ["pptx"] : ["txt", "md", "docx", "pdf"];
+    work.kind === "slides"
+      ? ["pptx"]
+      : work.kind === "spreadsheet"
+        ? ["xlsx"]
+        : ["txt", "md", "docx", "pdf"];
   if (!allowed.includes(ext))
     throw Error(
       `当前无法制作 ${work.kind}/${ext}，已保留研究和方案；需要相应制作适配器`,
@@ -205,6 +313,7 @@ export async function renderWork(
   );
   if (issues.length) throw Error(`作品自动检查未通过：${issues.join("；")}`);
   const out = join(folder, `${baseName}.${ext}`);
+  if (ext === "xlsx") return renderSpreadsheet(work, out);
   if (ext === "pptx") {
     const ppt = new PptxGenJS();
     ppt.layout = "LAYOUT_WIDE";

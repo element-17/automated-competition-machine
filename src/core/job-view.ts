@@ -72,7 +72,7 @@ const LayoutReport = z.object({
   checkedPages: z.array(z.number().int().positive()),
   failedPages: z.array(z.number().int().positive()),
   complete: z.boolean(),
-  textCoverage: z.enum(["unverified", "not_applicable"]),
+  textCoverage: z.enum(["verified", "mismatch", "unverified", "not_applicable"]),
   textCoverageDetails: z.string(),
   criteria: z.array(z.object({
     criterion: z.number().int().nonnegative(),
@@ -296,7 +296,7 @@ export function jobViewSummary(view: JobView): string[] {
       lines.push(`外部 Agent 执行：${m.runtime.attempts} 次；内部模型调用量未统计`);
   } else lines.push("模型调用统计：无可用记录，用量未知");
   if (view.reuse.length)
-    lines.push(`文本复用检查：${view.reuse.length} 份逐轮记录；高复用 ${view.reuse.filter((r) => r.report.status === "blocked").length}、需核查 ${view.reuse.filter((r) => r.report.status === "review" || r.report.status === "unverified").length}。这不是原创率或AI检测结果。`);
+    lines.push(`文本相似线索：${view.reuse.length} 份逐轮记录；较长匹配 ${view.reuse.filter((r) => r.report.status === "blocked" || r.report.status === "review").length}。仅供正常评审参考，不按比例自动返工，也不要求补交原创证明；这不是原创率或AI检测结果。`);
   if (view.candidates.length)
     lines.push(
       `选题：${view.candidates.length} 个候选，共 ${view.candidates.reduce((n, c) => n + c.sources.length, 0)} 条关联来源；没有证据不代表原创`,

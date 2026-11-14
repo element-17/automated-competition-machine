@@ -856,24 +856,22 @@ test("实际文件违反明确数值限制时先返工，模型说通过也不�
   }
 });
 
-test("命名或字数规则无法核实时任务失败，不登记为投稿件", async () => {
+test("命名规则无法自动核实时交付作品，并逐条列给用户终审", async () => {
   const d = item("报告", ["txt"]);
   d.naming = "学校_作者姓名_作品名称";
   d.limits = ["1000字以内"];
   const ctx = await setup(brief([d]));
   try {
     const g = documentGateway({ tasks: [documentTask()] });
-    await assert.rejects(
-      runOrchestration(ctx.cfg, ctx.store, g, {
-        jobId: ctx.job,
-        competitionId: ctx.id,
-        idea,
-      }),
-      /未通过全部验收|交付要求未满足|仍未通过验收/,
-    );
-    assert.ok(
-      !ctx.store.artifacts(ctx.job).some((a) => a.kind === "submission"),
-    );
+    const result = await runOrchestration(ctx.cfg, ctx.store, g, {
+      jobId: ctx.job,
+      competitionId: ctx.id,
+      idea,
+    });
+    // 无法核对不等于不合格：作品照常交付，但每条未核实的规则都要明确交给用户。
+    assert.equal(result.deliverables[0].status, "submission");
+    const gaps = result.gaps.join("；");
+    assert.match(gaps, /需人工终审：学校_作者姓名_作品名称/);
   } finally {
     await ctx.done();
   }

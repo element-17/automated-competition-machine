@@ -11,6 +11,15 @@ import {
   runAutomatic,
   deliveryFormat,
 } from "../dist/workflows/autonomous.js";
+import { CONCEPT_ROUTES } from "../dist/workflows/concept-quality.js";
+
+/** 候选分支并发调用，按提示词里的“本分支视角”定位，不能依赖调用顺序。 */
+function conceptRoute(prompt) {
+  const index = CONCEPT_ROUTES.findIndex((route) =>
+    prompt.includes(route.slice(0, 10)),
+  );
+  return index >= 0 ? index + 1 : null;
+}
 import { renderWork, Work } from "../dist/artifacts/artifacts.js";
 import { makeSoftware } from "../dist/artifacts/software.js";
 import { makeVisual, VisualBrief } from "../dist/artifacts/visual.js";
@@ -178,18 +187,11 @@ function reviewJSON(prompt) {
       criterion, status: "passed",
       evidence: "产物正文包含基于当前资料的方案；演示页包含真实可检验方案标题。",
     })),
-    ...reviewContract(prompt),
   });
 }
 
 
 
-// 每份 fixture 产物实际展开合同；验收只从本次产物行中取局部原文。
-function contractRows(prompt) {
-  const prefix = "策略质量合同（硬性要求，返工不得删减或降低）：";
-  const line = prompt.split(/\r?\n/).find((line) => line.startsWith(prefix));
-  return line ? JSON.parse(line.slice(prefix.length)) : [];
-}
 function fixtureIdea(index) {
   const routes = [
     { audience: "无联网设备的校园服务窗口及排队学生", problem: "材料不齐的申请占用窗口时间，完整申请被反复等待", mechanism: "先用纸质清单核验材料，再按完整度和等候时间重排两条办理队列", verification: "交替时段对照先到先服务，记录平均等待分钟数及错分率；错分超过5%即停止重排" },
@@ -198,76 +200,15 @@ function fixtureIdea(index) {
   ];
   return { title: `方案${index}`, ...routes[(index - 1) % routes.length], evidence_urls: [] };
 }
-function contractSections(prompt) {
-  return contractRows(prompt).map(({ id, requirement }) => {
-    const [, field, n] = id.split(".");
-    const headings = { problem: "需求边界", audience: "使用场景", mechanism: "工作机制", differentiators: "机制对照", tradeoffs: "资源取舍", validation: "验证步骤", evidenceLimits: "证据边界" };
-    const detail = {
-      problem: "分别记录排队和补材料耗时，定位瓶颈；不处理校外业务。",
-      audience: "入口核验纸质材料，异常申请保留人工办理通道。",
-      mechanism: "输入到达时间和窗口状态，按上述规则输出队列，并记录调整原因。",
-      differentiators: "对照组固定窗口；实验组保留逐次分配记录，辨别改变来自哪一步。",
-      tradeoffs: "仅在规定时点更新，未核验申请不得自动改道，以控制额外劳动。",
-      validation: "核对两组业务难度，达到失败阈值即停止分流。这是验证计划，尚未产生实测结果。",
-      evidenceLimits: "不宣称已查证原创，不编造测试成绩。",
-    };
-    assert.ok(headings[field], `未知合同项 ${id}`);
-    return { id, heading: `${headings[field]}${n ? ` ${n}` : ""}：`, text: `${headings[field]}${n ? ` ${n}` : ""}：${requirement}。${detail[field]}` };
-  });
+function fixtureText(_prompt, intro) {
+  return `${intro}\n每五分钟记录窗口等待时长，连续超限时调整一个窗口的分流方向。与固定分流对照检查等待时间和错分率。这是验证计划，尚未产生实测结果。`;
 }
-function planContract(prompt, kind = "document") {
-  const sections = contractSections(prompt);
-  return sections.length ? { qualityContract: sections.map(({ id, heading }, i) => ({
-    id, implementation: kind === "slides" ? `第${i + 2}页“${heading}”给出具体步骤、约束及检查依据，验收该页实际文本` : `正文“${heading}”段落实具体步骤和检查依据，逐段核对实际内容`,
-  })) } : {};
+function fixtureSlides() {
+  const text = (value, y, size) => ({ text: value, x: 1, y, w: 10, h: 2, fontSize: size, color: "202832" });
+  return [{ background: "FFFFFF", elements: [text("真实可检验方案", 1, 24), text("记录窗口等待时长并按现场反馈调整分流，检查等待时间和错分率。", 3, 18)] }];
 }
-function reviewContract(prompt) {
-  const sections = contractSections(prompt);
-  if (!sections.length) return {};
-  const material = prompt.split("产物内容：\n")[1] || "";
-  const lines = [...material.matchAll(/^\[(L\d+)\] (.*)$/gm)].map(([, location, text]) => ({ location, text }));
-  return { qualityContract: sections.map(({ id, heading }) => {
-    const requirement = contractRows(prompt).find((row) => row.id === id).requirement;
-    for (const { location, text } of lines) {
-      let fragments = [text];
-      if (text.startsWith('[{"page":')) fragments = JSON.parse(text).flatMap((slide) => slide.text);
-      const actual = fragments.find((part) => part.startsWith(heading) && part.includes(requirement));
-      if (actual && actual.length <= 400) return { id, status: "passed", reason: `本次产物“${heading}”的具体步骤和边界落实该项要求`, evidence: { kind: "text", location, quote: actual } };
-    }
-    return { id, status: "failed", reason: `本次实际产物缺少“${heading}”的具体实现或有效局部证据` };
-  }) };
-}
-function fixtureText(prompt, intro) {
-  return [intro, ...contractSections(prompt).map((section) => section.text)].join("\n");
-}
-function fixtureSlides(prompt) {
-  const text = (value, y, size, bold = false) => ({ text: value, x: 1, y, w: 10, h: size === 24 ? 0.8 : 4.5, fontSize: size, color: "202832", bold });
-  return [{ background: "FFFFFF", elements: [text("真实可检验方案", 1, 24, true)] }, ...contractSections(prompt).map(({ heading, text: body }) => ({ background: "FFFFFF", elements: [text(heading.slice(0, -1), 0.5, 24, true), text(body, 1.5, 16)] }))];
-}
-
-function conceptReview(prompt, overrides = {}) {
-  const lines = prompt.split(String.fromCharCode(10));
-  const candidates = JSON.parse(lines.find((l) => l.startsWith("候选：")).slice(3));
-  const evidence = JSON.parse(lines.find((l) => l.startsWith("已获取的相似作品资料：")).slice(11));
-  const selected = overrides.selected ?? Math.min(2, candidates.length);
-  const idea = candidates[selected - 1];
-  const check = (idea, field) => ({ status: "passed", basis: { field, quote: idea[field] }, reason: `该${field}包含可执行方案，可结合规则对照检查` });
-  const comparisons = candidates.flatMap((left, i) => candidates.slice(i + 1).map((right, offset) => ({
-    left: i + 1, right: i + offset + 2, verdict: "distinct",
-    leftMechanism: left.mechanism, rightMechanism: right.mechanism,
-    mechanismDifference: `${left.mechanism}与${right.mechanism}的处理步骤和行动依据不同`,
-    constraintDifference: `${left.audience}与${right.audience}的资源约束不同`,
-    validationDifference: `${left.verification}与${right.verification}使用不同对照和失败边界`,
-    rewriteCandidate: null, rewriteInstructions: "",
-  })));
-  return JSON.stringify({
-    selected, analysis: "第二个机制适配当前约束，效果尚未实测", similarity_risks: ["往届作品公开不足"],
-    strategy: { problem: idea.problem, audience: idea.audience, mechanism: idea.mechanism, differentiators: [`与先到先服务且固定窗口相比，方案通过“${idea.mechanism}”改变分配依据`], tradeoffs: ["采样需要时间，效果仍需实测"], validation: [idea.verification], evidenceLimits: ["未核实所有往届作品"] },
-    quality: candidates.map((idea, i) => ({ candidate: i + 1, fit: check(idea, "problem"), feasibility: check(idea, "mechanism"), validation: check(idea, "verification") })),
-    comparisons,
-    sourceComparisons: evidence.map((e) => ({ candidate: e.candidate, status: e.sources.length ? "compared" : "unverified", findings: e.sources.map((source) => ({ url: source.url, quote: source.excerpt, relation: "uncertain", reason: "正文披露的工作机制有限，尚不足判断候选原创性" })), limitations: ["正文没有完整对照实验，无法证明原创"] })),
-    ...overrides,
-  });
+function conceptReview(_prompt, overrides = {}) {
+  return JSON.stringify({ selected: 2, analysis: "反馈方案更适合需求波动，效果尚未实测", similarity_risks: ["往届作品公开不足"], ...overrides });
 }
 
 function makeGateway(data, overrides = {}) {
@@ -294,7 +235,7 @@ function makeGateway(data, overrides = {}) {
         });
       if (prompt.includes("为以下比赛独立提出一个作品方案")) {
         index++;
-        return JSON.stringify(fixtureIdea(index));
+        return JSON.stringify(fixtureIdea(conceptRoute(prompt) ?? index));
       }
       if (prompt.includes("任务：候选比较"))
         return conceptReview(prompt);
@@ -312,7 +253,6 @@ function makeGateway(data, overrides = {}) {
             instructions: `按比赛规则完成「${d.type}」的完整内容`,
             acceptance: [`内容完整对应「${d.type}」`],
             reason: "测试用规划",
-            ...planContract(prompt, /ppt|幻灯|演示/i.test(d.type) ? "slides" : "document"),
           })),
           packages: [],
           notes: [],
@@ -475,9 +415,12 @@ test("独立方案并发生成，针对各方案查询相似作品", async () =>
     };
     await runAutomatic(cfg, store, g, job);
     assert.equal(max, 3);
-    assert.equal(queries.filter((q) => q.includes("竞赛 获奖作品")).length, 3);
-    assert.equal(queries.filter((q) => q.includes("现有方案 作品")).length, 3);
-    assert.equal(queries.filter((q) => q.includes("替代方案 现有方法")).length, 3);
+    assert.equal(queries.filter((q) => q.includes("竞赛 获奖作品")).length, 0);
+    // 查询由关键词组成（模型抽取，失败时规则兜底）；每个候选各发两条检索。
+    assert.equal(queries.filter((q) => q.includes("现有方案")).length, 3);
+    assert.equal(queries.filter((q) => q.includes("替代方案")).length, 3);
+    // 单字泛词不得成为查询词（这类词只会命中百科词条并 403）。
+    assert.ok(queries.every((q) => q.trim().length >= 4));
     const prompts = g.calls.filter((c) => c.prompt.includes("为以下比赛独立提出一个作品方案")).map((c) => c.prompt);
     assert.ok(prompts.every((p) => /场景约束/.test(p) && /工作机制/.test(p) && /验证方法/.test(p)));
     assert.ok(prompts.every((p) => p.includes("用户材料独有线索")), "用户提供的现场材料必须进入全部独立初稿");
@@ -634,13 +577,9 @@ test("自动完成研究、三种独立方案和多个交付物；评审 Agent �
     const { default: PizZip } = await import("pizzip");
     const slides = new PizZip(await readFile(result.outputs.find((path) => path.endsWith(".pptx"))));
     const slideText = Object.entries(slides.files).filter(([name]) => /^ppt\/slides\/slide\d+\.xml$/.test(name)).map(([, file]) => file.asText()).join(" ");
-    for (const value of [result.choice.strategy.problem, result.choice.strategy.audience, result.choice.strategy.mechanism, ...result.choice.strategy.differentiators, ...result.choice.strategy.tradeoffs, ...result.choice.strategy.validation, ...result.choice.strategy.evidenceLimits]) {
-      assert.ok(docText.includes(value), `DOCX 必须实际展开 ${value}`);
-      assert.ok(slideText.includes(value), `PPT 页面必须实际展开 ${value}`);
-    }
+    assert.equal(result.choice.strategy, undefined, "最小选择不生成七项合同");
     assert.match(docText, /验证计划，尚未产生实测结果/);
     assert.match(slideText, /真实可检验方案/);
-    assert.ok(result.deliverables.every((d) => d.checks.filter((c) => c.id.startsWith("strategy.")).length >= 7));
     assert.match(result.gaps.join(" "), /往届/);
     const concepts = gateway.calls.filter((x) =>
       x.prompt.includes("为以下比赛独立提出一个作品方案"),
@@ -652,7 +591,8 @@ test("自动完成研究、三种独立方案和多个交付物；评审 Agent �
         (x) => x.role === "reviewer" && x.prompt.includes("任务：候选比较"),
       ),
     );
-    assert.ok(!concepts[1].prompt.includes("方案1"));
+    // 独立分支不应看到其他候选的内容；不按调用顺序取某一条判断。
+    assert.ok(concepts.every((x) => !/方案\d/.test(x.prompt)));
     const produced = gateway.calls.filter((x) =>
       x.prompt.includes("请针对这项比赛的指定交付物直接创作"),
     );
@@ -1155,7 +1095,7 @@ test("选题证据与风险进入规划提示和最终结果，不在制作节�
     const original = g.generate;
     let sawPlan = false;
     g.search = async (q) =>
-      q.includes("竞赛 获奖作品")
+      q.includes("替代方案")
         ? [
             {
               url: `${url}?novelty=1`,
@@ -1165,6 +1105,10 @@ test("选题证据与风险进入规划提示和最终结果，不在制作节�
           ]
         : [];
     g.generate = async (role, prompt) => {
+      if (prompt.includes("抽取") && prompt.includes("keywords"))
+        return JSON.stringify({
+          keywords: ["方案场景对象", "方案核心方法", "校园服务"],
+        });
       if (prompt.includes("任务：候选比较")) {
         assert.match(prompt, /相似作品使用了相同场景/);
         return conceptReview(prompt, { analysis: "选择方案2，但验证尚未完成", similarity_risks: ["方案2需要补充差异化验证"] });
@@ -1330,7 +1274,7 @@ test("已填写个人信息写进正文，缺实测资料仍阻止交付", async
   }
 });
 
-test("同词换标题的重复候选定向修复，恢复不重复初稿和已完成重写", async () => {
+test("明确核心雷同只修正所选候选，恢复不重复初稿和已完成修正", async () => {
   const { dir, store, cfg, server, url } = await setup();
   try {
     const id = store.addCompetition(url, "赛事"), job = store.createJob(id, "automatic", {}, 40);
@@ -1343,7 +1287,8 @@ test("同词换标题的重复候选定向修复，恢复不重复初稿和已�
       if (prompt.includes("为以下比赛独立提出一个作品方案")) {
         const idea = JSON.parse(await original(role, prompt));
         initial++;
-        if (initial <= 2) idea.mechanism = "按固定优先级分配人工资源";
+        // 让分支 1 和 2 核心机制相同；按分支视角判断，避免并发顺序导致不稳定。
+        if ([1, 2].includes(conceptRoute(prompt))) idea.mechanism = "按固定优先级分配人工资源";
         return JSON.stringify(idea);
       }
       if (prompt.includes("任务：定向重写重复候选")) {
@@ -1354,7 +1299,7 @@ test("同词换标题的重复候选定向修复，恢复不重复初稿和已�
       if (prompt.includes("任务：候选比较")) {
         reviews++;
         if (reviews === 2 && fail) throw Error("调用预算上限，暂停复审");
-        return conceptReview(prompt);
+        return conceptReview(prompt, reviews === 1 ? { core_duplicate: { candidate: 2, otherCandidate: 1, reason: "两者均按同一固定优先级分配人工资源，所选方案无增量", instructions: "针对需求波动引入现场反馈" } } : {});
       }
       return original(role, prompt);
     };
@@ -1362,8 +1307,8 @@ test("同词换标题的重复候选定向修复，恢复不重复初稿和已�
     assert.equal(initial, 3);
     assert.equal(rewrites, 1);
     const blocked = JSON.parse(await readFile(join(dir, "jobs", job, "concept-review.json"), "utf8"));
-    assert.equal(blocked.selected, null);
-    assert.equal(blocked.strategy, null);
+    assert.equal(blocked.selected, 2);
+    assert.equal(blocked.core_duplicate.candidate, 2);
     assert.equal(blocked.rewrites[0].candidate, 2);
     fail = false;
     const result = await runAutomatic(cfg, store, gateway, job, true);
@@ -1373,14 +1318,14 @@ test("同词换标题的重复候选定向修复，恢复不重复初稿和已�
     assert.ok([...queryCounts.values()].every((n) => n === 1));
     assert.equal(result.ideas[0].mechanism, "按固定优先级分配人工资源");
     assert.equal(result.ideas[1].mechanism, "根据等待时长闭环调整资源分配");
-    assert.equal(result.choice.strategy.mechanism, result.ideas[1].mechanism);
+    assert.equal(result.choice.selected, 2);
     assert.equal(result.candidateEvidence[1].title, "反馈分流");
     const saved = JSON.parse(await readFile(join(dir, "jobs", job, "concept-2.json"), "utf8"));
     assert.equal(saved.mechanism, "按固定优先级分配人工资源", "保留独立初稿，不覆盖分支缓存");
   } finally { server.close(); store.close(); await rm(dir, { recursive: true, force: true }); }
 });
 
-test("两轮重写仍重复时明确失败，不降低标准继续制作", async () => {
+test("一次修正后仍被明确指出核心雷同时失败，不默认成功", async () => {
   const { dir, store, cfg, server, url } = await setup();
   try {
     const id = store.addCompetition(url, "赛事"), job = store.createJob(id, "automatic", {}, 40);
@@ -1397,29 +1342,38 @@ test("两轮重写仍重复时明确失败，不降低标准继续制作", async
         rewrites++;
         return JSON.stringify({ title: `换个标题${rewrites}`, audience: "学生", problem: "分配问题", mechanism: "同一个固定打分流程", verification: "记录分配误差", evidence_urls: [] });
       }
+      if (prompt.includes("任务：候选比较")) return conceptReview(prompt, { core_duplicate: { candidate: 2, otherCandidate: 1, reason: "两者核心均为同一个固定打分流程，仍没有增量", instructions: "改变实际分配规则" } });
       return original(role, prompt);
     };
-    await assert.rejects(runAutomatic(cfg, store, gateway, job), /已完成2轮定向重写.*仍有实质重复/);
-    assert.equal(rewrites, 2);
+    await assert.rejects(runAutomatic(cfg, store, gateway, job), /已完成1轮定向修正.*仍有明确核心雷同/);
+    assert.equal(rewrites, 1);
     assert.ok(!gateway.calls.some((c) => c.prompt.includes("拆解成可以实际制作的文件任务")));
   } finally { server.close(); store.close(); await rm(dir, { recursive: true, force: true }); }
 });
 
-test("合同 fixture 从真实文本和页面局部内容取证，删掉机制不能通过", () => {
-  const rows = [{ id: "strategy.mechanism", requirement: fixtureIdea(2).mechanism }];
-  const prefix = `策略质量合同（硬性要求，返工不得删减或降低）：${JSON.stringify(rows)}`;
-  const text = fixtureText(prefix, "基于当前资料提出的方案");
-  const numbered = text.split("\n").map((line, i) => `[L${i + 1}] ${line}`).join("\n");
-  const result = reviewContract(`${prefix}\n产物内容：\n${numbered}`).qualityContract[0];
-  assert.equal(result.status, "passed");
-  assert.equal(result.evidence.location, "L2");
-  assert.ok(text.includes(result.evidence.quote));
-  assert.equal(reviewContract(`${prefix}\n产物内容：\n[L1] 真实可检验方案`).qualityContract[0].status, "failed");
-  const slides = fixtureSlides(prefix).map((s, i) => ({ page: i + 1, text: s.elements.map((e) => e.text) }));
-  const slideReview = reviewContract(`${prefix}\n产物内容：\n[L1] ${JSON.stringify(slides)}`).qualityContract[0];
-  assert.equal(slideReview.status, "passed");
-  assert.ok(slideReview.evidence.quote.length < 400);
-  assert.ok(slides[1].text.includes(slideReview.evidence.quote));
-  slides[1].text.pop();
-  assert.equal(reviewContract(`${prefix}\n产物内容：\n[L1] ${JSON.stringify(slides)}`).qualityContract[0].status, "failed");
+test("未选候选相似和来源不确定不返工，直接进入创作", async () => {
+  const { dir, store, cfg, server, url } = await setup();
+  try {
+    const id = store.addCompetition(url, "赛事"), job = store.createJob(id, "automatic", {}, 40);
+    const gateway = makeGateway(brief([item("报告", ["txt"])]));
+    const original = gateway.generate;
+    let initial = 0, reviews = 0;
+    gateway.generate = async (role, prompt) => {
+      if (prompt.includes("为以下比赛独立提出一个作品方案")) {
+        const idea = JSON.parse(await original(role, prompt));
+        if (++initial !== 2) idea.mechanism = "其他两个分支完全相同的机制";
+        return JSON.stringify(idea);
+      }
+      if (prompt.includes("任务：候选比较")) {
+        reviews++;
+        return conceptReview(prompt, { analysis: "候选1和3核心相同，选择候选2；无公开来源，比较 uncertain", core_duplicate: { candidate: 1, otherCandidate: 3, reason: "未选分支相同", instructions: "无需影响所选方案" } });
+      }
+      if (prompt.includes("任务：定向重写")) assert.fail("不应重写未选分支");
+      return original(role, prompt);
+    };
+    const result = await runAutomatic(cfg, store, gateway, job);
+    assert.equal(result.choice.selected, 2);
+    assert.equal(reviews, 1);
+    assert.ok(result.outputs.some((path) => path.endsWith(".txt")));
+  } finally { server.close(); store.close(); await rm(dir, { recursive: true, force: true }); }
 });

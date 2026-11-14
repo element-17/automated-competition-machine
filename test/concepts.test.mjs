@@ -10,33 +10,26 @@ import {
   candidateQueries,
   collectCandidateEvidence,
   compareCandidates,
+  relevantExcerpt,
 } from "../dist/workflows/concepts.js";
 
 
-function conceptReview(prompt, overrides = {}) {
-  const lines = prompt.split(String.fromCharCode(10));
-  const candidates = JSON.parse(lines.find((l) => l.startsWith("候选：")).slice(3));
-  const evidence = JSON.parse(lines.find((l) => l.startsWith("已获取的相似作品资料：")).slice(11));
-  const selected = overrides.selected ?? Math.min(2, candidates.length);
-  const idea = candidates[selected - 1];
-  const check = (idea, field) => ({ status: "passed", basis: { field, quote: idea[field] }, reason: `该${field}包含可执行方案，可结合规则对照检查` });
-  const comparisons = candidates.flatMap((left, i) => candidates.slice(i + 1).map((right, offset) => ({
-    left: i + 1, right: i + offset + 2, verdict: "distinct",
-    leftMechanism: left.mechanism, rightMechanism: right.mechanism,
-    mechanismDifference: `${left.mechanism}与${right.mechanism}的处理步骤和行动依据不同`,
-    constraintDifference: `${left.audience}与${right.audience}的资源约束不同`,
-    validationDifference: `${left.verification}与${right.verification}使用不同对照和失败边界`,
-    rewriteCandidate: null, rewriteInstructions: "",
-  })));
-  return JSON.stringify({
-    selected, analysis: "第二个机制适配当前约束，效果尚未实测", similarity_risks: ["往届作品公开不足"],
-    strategy: { problem: idea.problem, audience: idea.audience, mechanism: idea.mechanism, differentiators: [idea.mechanism], tradeoffs: ["采样需要时间，效果仍需实测"], validation: [idea.verification], evidenceLimits: ["未核实所有往届作品"] },
-    quality: candidates.map((idea, i) => ({ candidate: i + 1, fit: check(idea, "problem"), feasibility: check(idea, "mechanism"), validation: check(idea, "verification") })),
-    comparisons,
-    sourceComparisons: evidence.map((e) => ({ candidate: e.candidate, status: e.sources.length ? "compared" : "unverified", findings: e.sources.map((source) => ({ url: source.url, quote: source.excerpt, relation: "uncertain", reason: "正文披露的工作机制有限，尚不足判断候选原创性" })), limitations: ["正文没有完整对照实验，无法证明原创"] })),
-    ...overrides,
-  });
+function conceptReview(_prompt, overrides = {}) {
+  return JSON.stringify({ selected: 2, analysis: "第二个机制适配当前约束，效果尚未实测", similarity_risks: ["往届作品公开不足"], ...overrides });
 }
+
+/**
+ * 关键词抽取提示词的固定回答：让测试实际走模型抽取的关键词路径。
+ * 关键词要随 mechanism 变化，否则改了机制仍会命中同一批缓存查询，测不出重查行为。
+ */
+const keywordReply = (prompt) => {
+  const title = /"title":"([^"]*)"/.exec(prompt)?.[1] || "作品";
+  const mechanism = /"mechanism":"([^"]*)"/.exec(prompt)?.[1] || "";
+  return JSON.stringify({
+    keywords: [`${title}相关对象`, mechanism ? `${mechanism}方法` : `${title}相关方法`, "校园场景"],
+  });
+};
+const isKeywordPrompt = (prompt) => prompt.includes("抽取") && prompt.includes("keywords");
 
 const ideas = [1, 2].map((i) => ({
   title: `方案${i}`,
@@ -88,6 +81,8 @@ test("候选比较读取真实相似作品正文，保留候选与查询映射�
         return [{ url, title: "往届作品", snippet: "搜索摘要不是证据" }];
       },
       generate: async (role, prompt) => {
+        if (isKeywordPrompt(prompt)) return keywordReply(prompt);
+        if (isKeywordPrompt(prompt)) return keywordReply(prompt);
         assert.match(prompt, /往届作品已采用机制1/);
         assert.doesNotMatch(prompt, /搜索摘要不是证据/);
         assert.match(prompt, /1 到 2/);
@@ -107,7 +102,7 @@ test("候选比较读取真实相似作品正文，保留候选与查询映射�
       [1, 2],
     );
     assert.equal(fetches, 1);
-    assert.equal(searches, 6);
+    assert.equal(searches, 4);
     const result = await compareCandidates(
       ctx.cfg,
       ctx.store,
@@ -128,7 +123,7 @@ test("候选比较读取真实相似作品正文，保留候选与查询映射�
       ctx.id,
       ideas,
     );
-    assert.equal(searches, 6);
+    assert.equal(searches, 4);
     assert.equal(fetches, 1);
     const stored = JSON.parse(
       await readFile(
@@ -137,8 +132,9 @@ test("候选比较读取真实相似作品正文，保留候选与查询映射�
       ),
     );
     assert.equal(stored[0].sources[0].url, url);
-    assert.match(stored[1].query, /问题2 学生/);
-    assert.equal(stored[1].queries.length, 3);
+    // 查询来自关键词抽取，必须包含该候选自己的内容，而不是别的候选。
+    assert.match(stored[1].query, /方案2/);
+    assert.equal(stored[1].queries.length, 2);
     assert.ok(stored[1].queries.every((q) => q.fingerprint.length === 64));
   } finally {
     server.close();
@@ -176,7 +172,9 @@ test("只剩一个候选时越界选择直接失败；检索不可用保留证�
         throw Error("不可调用");
       },
       generate: async (_, prompt) =>
-        JSON.stringify({ ...JSON.parse(conceptReview(prompt)), selected: 3 }),
+        isKeywordPrompt(prompt)
+          ? keywordReply(prompt)
+          : JSON.stringify({ ...JSON.parse(conceptReview(prompt)), selected: 3 }),
     };
     const evidence = await collectCandidateEvidence(
       ctx.cfg,
@@ -225,7 +223,8 @@ test("网页读取失败不会拿摘要冒充正文，恢复时重试网页但�
   const url = `http://127.0.0.1:${server.address().port}/work`;
   try {
     const g = {
-      generate: async () => "",
+      generate: async (_, prompt) =>
+        isKeywordPrompt(prompt) ? keywordReply(prompt) : "",
       search: async () => {
         queries++;
         return [{ url, title: "作品", snippet: "摘要声称绝对原创" }];
@@ -251,7 +250,7 @@ test("网页读取失败不会拿摘要冒充正文，恢复时重试网页但�
       ctx.id,
       ideas.slice(0, 1),
     );
-    assert.equal(queries, 3);
+    assert.equal(queries, 2);
     assert.match(second[0].sources[0].excerpt, /恢复后可读/);
   } finally {
     server.close();
@@ -260,23 +259,37 @@ test("网页读取失败不会拿摘要冒充正文，恢复时重试网页但�
 });
 
 test("主要关键词不依赖自造标题且更名不改变主要查询", () => {
-  const first = candidateQueries(ideas[0]);
-  const renamed = candidateQueries({ ...ideas[0], title: "炫酷独创宇宙平台" });
-  assert.deepEqual(first.slice(0, 2), renamed.slice(0, 2));
-  assert.ok(first[0].includes(ideas[0].problem));
-  assert.ok(first[0].includes(ideas[0].audience));
-  assert.ok(first[1].includes(ideas[0].mechanism));
-  assert.doesNotMatch(first.slice(0, 2).join(" "), /方案1/);
+  // 用真实方案内容；占位词（问题1/机制1）本就该被过滤，不发无意义查询。
+  const idea = {
+    title: "方案1",
+    audience: "校园服务窗口的排队学生",
+    problem: "材料不齐的申请占用窗口时间",
+    mechanism: "纸质清单核验材料后按等候时间重排队列",
+    verification: "对照记录平均等待分钟数",
+    evidence_urls: [],
+  };
+  const first = candidateQueries(idea);
+  const renamed = candidateQueries({ ...idea, title: "炫酷独创宇宙平台" });
+  assert.deepEqual(first, renamed, "更名不影响检索词");
+  assert.ok(first.length >= 1);
+  assert.doesNotMatch(first.join(" "), /炫酷独创宇宙平台/);
+  // 泛词与单字不得进入查询。
+  assert.doesNotMatch(first.join(" "), /(?:^|\s)(?:市|装置|传统|借鉴|方案|系统)(?:\s|$)/);
+  // 纯占位内容不产生查询，避免抓取必然 403 的百科词条。
+  assert.deepEqual(candidateQueries(ideas[0]), []);
 });
 
 test("搜索预算异常必须传播，不能作为无结果继续", async () => {
   const ctx = await setup();
   try {
-    await assert.rejects(collectCandidateEvidence(ctx.cfg, ctx.store, { search: async () => { throw Error("调用预算耗尽"); } }, ctx.job, ctx.id, ideas.slice(0, 1)), /预算耗尽/);
+    await assert.rejects(collectCandidateEvidence(ctx.cfg, ctx.store, {
+      search: async () => { throw Error("调用预算耗尽"); },
+      generate: async (_, prompt) => keywordReply(prompt),
+    }, ctx.job, ctx.id, ideas.slice(0, 1)), /预算耗尽/);
   } finally { await ctx.done(); }
 });
 
-test("每候选最多四篇正文，重定向成功和评审在恢复后不重复调用", async () => {
+test("每候选最多三篇正文，重定向成功和评审在恢复后不重复调用", async () => {
   const ctx = await setup();
   let searches = 0, fetches = 0, reviews = 0;
   const server = createServer((req, res) => {
@@ -287,23 +300,24 @@ test("每候选最多四篇正文，重定向成功和评审在恢复后不重�
   });
   await new Promise((r) => server.listen(0, "127.0.0.1", r));
   const base = `http://127.0.0.1:${server.address().port}`;
-  const gateway = { search: async () => { searches++; return Array.from({ length: 8 }, (_, i) => ({ url: `${base}/alias/${i}`, title: `作品${i}`, snippet: "不作证据" })); }, generate: async (_, prompt) => { reviews++; return conceptReview(prompt); } };
+  const gateway = { search: async () => { searches++; return Array.from({ length: 8 }, (_, i) => ({ url: `${base}/alias/${i}`, title: `作品${i}`, snippet: "不作证据" })); }, generate: async (_, prompt) => isKeywordPrompt(prompt) ? keywordReply(prompt) : (reviews++, conceptReview(prompt)) };
   try {
     const first = await collectCandidateEvidence(ctx.cfg, ctx.store, gateway, ctx.job, ctx.id, ideas);
-    assert.ok(first.every((e) => e.sources.length === 4));
-    assert.equal(fetches, 8);
+    assert.ok(first.every((e) => e.sources.length === 3));
+    assert.equal(fetches, 6);
     await compareCandidates(ctx.cfg, ctx.store, gateway, ctx.job, ctx.brief, ideas, first, []);
     const second = await collectCandidateEvidence(ctx.cfg, ctx.store, gateway, ctx.job, ctx.id, ideas);
     await compareCandidates(ctx.cfg, ctx.store, gateway, ctx.job, ctx.brief, ideas, second, []);
-    assert.equal(fetches, 8);
-    assert.equal(searches, 6);
+    assert.equal(fetches, 6);
+    assert.equal(searches, 4);
     assert.equal(reviews, 1);
     const changed = [ideas[0], { ...ideas[1], mechanism: "新的对照推演机制" }];
     const third = await collectCandidateEvidence(ctx.cfg, ctx.store, gateway, ctx.job, ctx.id, changed, second);
     assert.equal(third[0], second[0]);
     assert.notEqual(third[1].fingerprint, second[1].fingerprint);
-    assert.equal(searches, 7);
-    assert.equal(fetches, 8);
+    // 改过的候选有新的关键词，两条查询都要重查（旧的 4 条已缓存）。
+    assert.equal(searches, 6);
+    assert.equal(fetches, 6);
   } finally { server.close(); await ctx.done(); }
 });
 
@@ -312,8 +326,61 @@ test("搜索和评审暂停异常原样传播，不转为失败证据或重写",
   const { JobControlError } = await import("../dist/core/job-control.js");
   const pause = new JobControlError("pause");
   try {
-    await assert.rejects(collectCandidateEvidence(ctx.cfg, ctx.store, { search: async () => { throw pause; } }, ctx.job, ctx.id, ideas), (error) => error === pause);
+    await assert.rejects(collectCandidateEvidence(ctx.cfg, ctx.store, { search: async () => { throw pause; }, generate: async (_, prompt) => keywordReply(prompt) }, ctx.job, ctx.id, ideas), (error) => error === pause);
     const evidence = await collectCandidateEvidence(ctx.cfg, ctx.store, { search: async () => [] }, ctx.job, ctx.id, ideas);
     await assert.rejects(compareCandidates(ctx.cfg, ctx.store, { generate: async () => { throw pause; } }, ctx.job, ctx.brief, ideas, evidence, []), (error) => error === pause);
+  } finally { await ctx.done(); }
+});
+
+test("正文后段的机制可以找到，摘录记录原文区间和截断状态", () => {
+  const text = ("赛事背景和历史沿革，以下是宣传性文字。".repeat(100) + "\n").repeat(6) + "仅两个离线窗口：按人工核验优先级重排队列，记录等候时间与错分率。";
+  const excerpt = relevantExcerpt(text, { ...ideas[0], problem: "排队耗时", audience: "两个离线窗口", mechanism: "按人工核验优先级重排队列" });
+  assert.match(excerpt.excerpt, /按人工核验优先级重排队列/);
+  assert.ok(excerpt.ranges.some((range) => range.start > 6000));
+  assert.equal(excerpt.originalLength, text.length);
+  assert.equal(excerpt.truncated, true);
+  assert.equal(excerpt.excerpt, excerpt.ranges.map((r) => text.slice(r.start, r.end)).join("\n[…]\n"));
+  assert.ok(excerpt.excerpt.length < 6000);
+  assert.equal(relevantExcerpt("完整短正文", ideas[0]).truncated, false);
+});
+
+test("无来源与不确定不阻塞最小选择；未变化的恢复不重复调用", async () => {
+  const ctx = await setup();
+  let searches = 0, reviews = 0;
+  const gateway = { search: async () => { searches++; return []; }, generate: async (_, prompt) => isKeywordPrompt(prompt) ? keywordReply(prompt) : (reviews++, JSON.stringify({ selected: 2, analysis: "来源未获取，差异 uncertain；仍选择适合场景的方案2" })) };
+  try {
+    const first = await collectCandidateEvidence(ctx.cfg, ctx.store, gateway, ctx.job, ctx.id, ideas);
+    const selected = await compareCandidates(ctx.cfg, ctx.store, gateway, ctx.job, ctx.brief, ideas, first);
+    assert.equal(selected.choice.selected, 2);
+    assert.equal(selected.choice.strategy, undefined);
+    const second = await collectCandidateEvidence(ctx.cfg, ctx.store, gateway, ctx.job, ctx.id, ideas);
+    await compareCandidates(ctx.cfg, ctx.store, gateway, ctx.job, ctx.brief, ideas, second);
+    assert.equal(searches, 4);
+    assert.equal(reviews, 1);
+    assert.match(selected.gaps.join(" "), /比较范围有限/);
+  } finally { await ctx.done(); }
+});
+
+test("旧空结果过期后可重查，即使传入旧候选证据", async () => {
+  const ctx = await setup();
+  let searches = 0;
+  const gateway = { search: async () => { searches++; return []; }, generate: async (_, prompt) => keywordReply(prompt) };
+  try {
+    const first = await collectCandidateEvidence(ctx.cfg, ctx.store, gateway, ctx.job, ctx.id, ideas);
+    const old = new Date(Date.now() - 7 * 60 * 60 * 1000).toISOString();
+    ctx.store.db.prepare("UPDATE searches SET searched_at = ?").run(old);
+    first.forEach((e) => e.collectedAt = old);
+    await collectCandidateEvidence(ctx.cfg, ctx.store, gateway, ctx.job, ctx.id, ideas, first);
+    assert.equal(searches, 8);
+  } finally { await ctx.done(); }
+});
+
+test("比较解析失败显式失败，不默认首项；评审预算异常传播", async () => {
+  const ctx = await setup();
+  try {
+    for (const output of ["not JSON", '{"analysis":"missing selected"}', '{"selected":0,"analysis":"invalid"}'])
+      await assert.rejects(compareCandidates(ctx.cfg, ctx.store, { generate: async () => output }, ctx.job, ctx.brief, ideas, []), /候选方案比较失败/);
+    const error = Error("调用预算耗尽");
+    await assert.rejects(compareCandidates(ctx.cfg, ctx.store, { generate: async () => { throw error; } }, ctx.job, ctx.brief, ideas, []), (e) => e === error);
   } finally { await ctx.done(); }
 });

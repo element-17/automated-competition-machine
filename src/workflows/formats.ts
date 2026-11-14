@@ -18,6 +18,7 @@ const formatWords: [RegExp, string][] = [
   [/\.?docx?\b|word\s*(文档|格式)?|word版/i, "docx"],
   [/\.?pdf\b/i, "pdf"],
   [/\.?pptx?\b|powerpoint|演示文稿/i, "pptx"],
+  [/\.?xlsx?\b|excel|电子表格/i, "xlsx"],
   [/\.?zip\b|\.?rar\b|\.?7z\b|压缩包|压缩文件/i, "zip"],
   [/\.?png\b/i, "png"],
   [/\.?jpe?g\b/i, "jpg"],

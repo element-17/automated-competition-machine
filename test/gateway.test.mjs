@@ -11,12 +11,6 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
 
-// 每份 fixture 产物实际展开合同；验收只从本次产物行中取局部原文。
-function contractRows(prompt) {
-  const prefix = "策略质量合同（硬性要求，返工不得删减或降低）：";
-  const line = prompt.split(/\r?\n/).find((line) => line.startsWith(prefix));
-  return line ? JSON.parse(line.slice(prefix.length)) : [];
-}
 function fixtureIdea(index) {
   const routes = [
     { audience: "无联网设备的校园服务窗口及排队学生", problem: "材料不齐的申请占用窗口时间，完整申请被反复等待", mechanism: "先用纸质清单核验材料，再按完整度和等候时间重排两条办理队列", verification: "交替时段对照先到先服务，记录平均等待分钟数及错分率；错分超过5%即停止重排" },
@@ -25,78 +19,6 @@ function fixtureIdea(index) {
   ];
   return { title: `方案${index}`, ...routes[(index - 1) % routes.length], evidence_urls: [] };
 }
-function contractSections(prompt) {
-  return contractRows(prompt).map(({ id, requirement }) => {
-    const [, field, n] = id.split(".");
-    const headings = { problem: "需求边界", audience: "使用场景", mechanism: "工作机制", differentiators: "机制对照", tradeoffs: "资源取舍", validation: "验证步骤", evidenceLimits: "证据边界" };
-    const detail = {
-      problem: "分别记录排队和补材料耗时，定位瓶颈；不处理校外业务。",
-      audience: "入口核验纸质材料，异常申请保留人工办理通道。",
-      mechanism: "输入到达时间和窗口状态，按上述规则输出队列，并记录调整原因。",
-      differentiators: "对照组固定窗口；实验组保留逐次分配记录，辨别改变来自哪一步。",
-      tradeoffs: "仅在规定时点更新，未核验申请不得自动改道，以控制额外劳动。",
-      validation: "核对两组业务难度，达到失败阈值即停止分流。这是验证计划，尚未产生实测结果。",
-      evidenceLimits: "不宣称已查证原创，不编造测试成绩。",
-    };
-    assert.ok(headings[field], `未知合同项 ${id}`);
-    return { id, heading: `${headings[field]}${n ? ` ${n}` : ""}：`, text: `${headings[field]}${n ? ` ${n}` : ""}：${requirement}。${detail[field]}` };
-  });
-}
-function planContract(prompt, kind = "document") {
-  const sections = contractSections(prompt);
-  return sections.length ? { qualityContract: sections.map(({ id, heading }, i) => ({
-    id, implementation: kind === "slides" ? `第${i + 2}页“${heading}”给出具体步骤、约束及检查依据，验收该页实际文本` : `正文“${heading}”段落实具体步骤和检查依据，逐段核对实际内容`,
-  })) } : {};
-}
-function reviewContract(prompt) {
-  const sections = contractSections(prompt);
-  if (!sections.length) return {};
-  const material = prompt.split("产物内容：\n")[1] || "";
-  const lines = [...material.matchAll(/^\[(L\d+)\] (.*)$/gm)].map(([, location, text]) => ({ location, text }));
-  return { qualityContract: sections.map(({ id, heading }) => {
-    const requirement = contractRows(prompt).find((row) => row.id === id).requirement;
-    for (const { location, text } of lines) {
-      let fragments = [text];
-      if (text.startsWith('[{"page":')) fragments = JSON.parse(text).flatMap((slide) => slide.text);
-      const actual = fragments.find((part) => part.startsWith(heading) && part.includes(requirement));
-      if (actual && actual.length <= 400) return { id, status: "passed", reason: `本次产物“${heading}”的具体步骤和边界落实该项要求`, evidence: { kind: "text", location, quote: actual } };
-    }
-    return { id, status: "failed", reason: `本次实际产物缺少“${heading}”的具体实现或有效局部证据` };
-  }) };
-}
-function fixtureText(prompt, intro) {
-  return [intro, ...contractSections(prompt).map((section) => section.text)].join("\n");
-}
-function fixtureSlides(prompt) {
-  const text = (value, y, size, bold = false) => ({ text: value, x: 1, y, w: 10, h: size === 24 ? 0.8 : 4.5, fontSize: size, color: "202832", bold });
-  return [{ background: "FFFFFF", elements: [text("真实可检验方案", 1, 24, true)] }, ...contractSections(prompt).map(({ heading, text: body }) => ({ background: "FFFFFF", elements: [text(heading.slice(0, -1), 0.5, 24, true), text(body, 1.5, 16)] }))];
-}
-
-function conceptReview(prompt, overrides = {}) {
-  const lines = prompt.split(String.fromCharCode(10));
-  const candidates = JSON.parse(lines.find((l) => l.startsWith("候选：")).slice(3));
-  const evidence = JSON.parse(lines.find((l) => l.startsWith("已获取的相似作品资料：")).slice(11));
-  const selected = overrides.selected ?? Math.min(2, candidates.length);
-  const idea = candidates[selected - 1];
-  const check = (idea, field) => ({ status: "passed", basis: { field, quote: idea[field] }, reason: `该${field}包含可执行方案，可结合规则对照检查` });
-  const comparisons = candidates.flatMap((left, i) => candidates.slice(i + 1).map((right, offset) => ({
-    left: i + 1, right: i + offset + 2, verdict: "distinct",
-    leftMechanism: left.mechanism, rightMechanism: right.mechanism,
-    mechanismDifference: `${left.mechanism}与${right.mechanism}的处理步骤和行动依据不同`,
-    constraintDifference: `${left.audience}与${right.audience}的资源约束不同`,
-    validationDifference: `${left.verification}与${right.verification}使用不同对照和失败边界`,
-    rewriteCandidate: null, rewriteInstructions: "",
-  })));
-  return JSON.stringify({
-    selected, analysis: "第二个机制适配当前约束，效果尚未实测", similarity_risks: ["往届作品公开不足"],
-    strategy: { problem: idea.problem, audience: idea.audience, mechanism: idea.mechanism, differentiators: [`与先到先服务且固定窗口相比，方案通过“${idea.mechanism}”改变分配依据`], tradeoffs: ["采样需要时间，效果仍需实测"], validation: [idea.verification], evidenceLimits: ["未核实所有往届作品"] },
-    quality: candidates.map((idea, i) => ({ candidate: i + 1, fit: check(idea, "problem"), feasibility: check(idea, "mechanism"), validation: check(idea, "verification") })),
-    comparisons,
-    sourceComparisons: evidence.map((e) => ({ candidate: e.candidate, status: e.sources.length ? "compared" : "unverified", findings: e.sources.map((source) => ({ url: source.url, quote: source.excerpt, relation: "uncertain", reason: "正文披露的工作机制有限，尚不足判断候选原创性" })), limitations: ["正文没有完整对照实验，无法证明原创"] })),
-    ...overrides,
-  });
-}
-
 function config(dir) {
   return {
     dataDir: dir,
@@ -455,7 +377,6 @@ test("auto 使用独立搜索和官方模型协议，从队列完成赛事文件
         pass: criteria.every((row) => row.status === "passed"),
         issues: criteria.every((row) => row.status === "passed") ? [] : ["缺少可核实的正文依据"],
         criteria,
-        ...reviewContract(prompt),
       });
     } else if (prompt.includes("拆解成可以实际制作的文件任务"))
       text = JSON.stringify({
@@ -468,21 +389,20 @@ test("auto 使用独立搜索和官方模型协议，从队列完成赛事文件
             format: "txt",
             instructions: "写完整报告",
             acceptance: ["内容完整"],
-            ...planContract(prompt),
           },
         ],
         packages: [],
         notes: [],
       });
     else if (prompt.includes("任务：候选比较"))
-      text = conceptReview(prompt, { selected: 1, analysis: "方案一的纸质核验与固定分流适用于离线窗口", similarity_risks: [] });
+      text = JSON.stringify({ selected: 1, analysis: "方案一的纸质核验与固定分流适用于离线窗口" });
     else if (prompt.includes("根据规则、证据与指定作品检查缺项"))
       text = JSON.stringify({ issues: [], unsupported_claims: [] });
     else if (prompt.includes("请针对这项比赛的指定交付物直接创作"))
       text = JSON.stringify({
         kind: "text",
         title: "方案",
-        text: fixtureText(prompt, "Gemini 作品正文"),
+        text: "Gemini 作品正文。先用纸质清单核验材料，再按完整度和等候时间分流；高峰时记录等待时长，按周比较调整效果。",
         sources: [],
       });
     else {
@@ -543,9 +463,9 @@ test("auto 使用独立搜索和官方模型协议，从队列完成赛事文件
     assert.match(stdout, /submission\.txt/);
     assert.ok(seen.some((x) => x.url.includes("generateContent")));
     assert.ok(seen.some((x) => x.url === "/v1/messages"));
-    /* 发现搜索16次、研究搜索6次、三候选各3条相似作品查询9次。 */ assert.equal(
+    /* 发现搜索16次、研究搜索6次、三候选各2条相似作品查询6次。 */ assert.equal(
       seen.filter((x) => x.url.startsWith("/search")).length,
-      31,
+      28,
     );
     const store = new Store(dir);
     try {
@@ -558,11 +478,11 @@ test("auto 使用独立搜索和官方模型协议，从队列完成赛事文件
       const actual = await readFile(artifact.path, "utf8");
       assert.match(actual, /Gemini 作品正文/);
       const review = JSON.parse(await readFile(join(dir, "jobs", queue[0].jobId, "concept-review.json"), "utf8"));
-      for (const value of [review.strategy.problem, review.strategy.audience, review.strategy.mechanism, ...review.strategy.differentiators, ...review.strategy.tradeoffs, ...review.strategy.validation, ...review.strategy.evidenceLimits])
-        assert.ok(actual.includes(value), `交付正文必须包含合同内容：${value}`);
-      assert.match(actual, /验证计划，尚未产生实测结果/);
+      assert.equal(review.selected, 1);
+      assert.match(actual, /纸质清单核验材料/);
+      assert.equal(review.strategy, undefined, "简短选题建议无需补策略证明");
       const plan = JSON.parse(await readFile(join(dir, "jobs", queue[0].jobId, "plan.json"), "utf8"));
-      assert.ok(plan.plan.tasks[0].qualityContract.length >= 7);
+      assert.equal(plan.plan.tasks[0].qualityContract, undefined);
     } finally {
       store.close();
     }

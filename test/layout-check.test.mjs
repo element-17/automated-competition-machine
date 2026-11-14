@@ -17,6 +17,7 @@ fakeExec[promisify.custom] = (...args) => renderer(...args);
 childProcess.execFile = fakeExec;
 syncBuiltinESMExports();
 const { checkLayout } = await import("../dist/artifacts/layout-check.js");
+const { renderers, textCoverage } = await import("../dist/artifacts/doc-render.js");
 childProcess.execFile = originalExec;
 syncBuiltinESMExports();
 const png = await sharp({ create: { width: 4, height: 4, channels: 3, background: "white" } }).png().toBuffer();
@@ -28,6 +29,12 @@ async function setup(t, options = {}) {
   const full = options.full || "可核验的文档正文";
   if (options.docx) await writeFile(file, await Packer.toBuffer(new Document({ sections: [{ children: [new Paragraph(full)] }] })));
   const count = options.count ?? 3, calls = [], prompts = [];
+  // Word 文档由同一份渲染结果提供页数、截图和文字；测试用假渲染器代替本机 Word。
+  renderers.docx = async () => {
+    if (options.renderFail) throw Error("无法把 Word 文档渲染成页面");
+    return { pages: count, text: Array.from({ length: count }, (_, i) => i ? "" : options.rendered ?? full),
+      png: async () => png, dispose: async () => {} };
+  };
   renderer = async (_command, args) => {
     calls.push(args);
     if (args[0] === "--version" || args[0] === "close") return { stdout: "ok", stderr: "" };
@@ -95,25 +102,27 @@ test("已知页数中间页越界也是失败，超过上限明确未完成", as
   await assert.rejects(checkLayout(x.gateway, x.file), (error) => error.report.totalPages === 501 && !error.report.complete);
 });
 
-test("全文渲染失败和空文字不能按通过处理，短文也核验", async (t) => {
-  for (const options of [{ htmlFail: 2 }, { htmlEmpty: true }]) {
-    const x = await setup(t, { docx: true, ...options });
-    await assert.rejects(checkLayout(x.gateway, x.file), (error) => {
-      assert.equal(error.report.complete, false);
-      assert.match(error.message, /全文/);
-      return true;
-    });
-  }
+test("Word 渲染失败不能按通过处理；页面没有文字是阻塞缺陷", async (t) => {
+  let x = await setup(t, { docx: true, renderFail: true });
+  await assert.rejects(checkLayout(x.gateway, x.file), (error) => {
+    assert.equal(error.report.complete, false);
+    assert.match(error.message, /渲染/);
+    return true;
+  });
+  x = await setup(t, { docx: true, rendered: "" });
+  const report = await checkLayout(x.gateway, x.file);
+  assert.equal(report.textCoverage, "mismatch");
+  assert.match(report.issues.join(" "), /没有任何可提取文字/);
 });
 
-test("非连续抽检的辅助全文读取整篇HTML，不混用原生页数且不声称逐字verified", async (t) => {
+test("Word 页数、截图和文字同源：不调用 officecli，抽检仍标明未完整覆盖", async (t) => {
   const x = await setup(t, { docx: true });
   const report = await checkLayout(x.gateway, x.file, [1, 3]);
+  assert.equal(report.totalPages, 3);
   assert.equal(report.complete, false);
-  assert.equal(report.textCoverage, "unverified");
-  assert.deepEqual(x.calls.filter((args) => args[2] === "html"), [["view", x.file, "html"]]);
-  assert.ok(x.calls.find((args) => args[2] === "stats").includes("--page-count"));
-  assert.ok(x.calls.filter((args) => args[2] === "screenshot").every((args) => args.at(-1) === "native"));
+  assert.equal(report.textCoverage, "verified");
+  assert.deepEqual(x.calls, []);
+  assert.match(x.prompts[1], /第 3 页，共 3 页（最后一页）/);
 });
 
 test("未知页数且CLI越界仍返回同一PNG，快速明确失败不循环至500页", async (t) => {
@@ -128,13 +137,21 @@ test("未知页数且CLI越界仍返回同一PNG，快速明确失败不循环�
   assert.equal(x.calls.filter((args) => args[2] === "screenshot").length, 2);
 });
 
-test("辅助HTML差异不冒充原生截图丢件或逐字完整性验证", async (t) => {
-  const x = await setup(t, { docx: true, count: 1, html: "不同后端的正文差异" });
-  const report = await checkLayout(x.gateway, x.file);
+test("渲染页面缺少文档结尾是阻塞缺陷；结尾完整时分页断句不算截断", async (t) => {
+  const full = "第一段写河湾的夜色与灯火。".repeat(30) + "全文在这里完整结束，没有丢失任何内容。";
+  let x = await setup(t, { docx: true, count: 2, full, rendered: full.slice(0, 200) });
+  let report = await checkLayout(x.gateway, x.file);
   assert.equal(report.complete, true);
-  assert.equal(report.textCoverage, "unverified");
-  assert.equal(report.auxiliaryText.status, "mismatch");
-  assert.match(report.suggestions.join(" "), /辅助HTML/);
+  assert.equal(report.textCoverage, "mismatch");
+  assert.match(report.issues.join(" "), /结尾/);
+  x = await setup(t, { docx: true, count: 2, full });
+  report = await checkLayout(x.gateway, x.file);
+  assert.equal(report.textCoverage, "verified");
+  assert.deepEqual(report.issues, []);
+  assert.match(x.prompts[0], /分页可以断在句子中间/);
+  // 页眉页脚等少量差异只提示，不阻塞。
+  const pages = [full.slice(0, 150) + "页眉", full.slice(150)];
+  assert.equal(textCoverage(full, pages).blocking, false);
 });
 
 test("视觉标准复用逐页评审，适用页证据通过且不适用页不强求重复元素", async (t) => {

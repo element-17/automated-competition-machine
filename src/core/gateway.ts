@@ -45,6 +45,9 @@ export function parseJSON(raw: string): unknown {
   try {
     return JSON.parse(s);
   } catch {
+    // 模型有时在 JSON 前后附带思考或说明：只要其中有一段完整、可解析的 JSON 就取用它。
+    const embedded = embeddedJSON(s);
+    if (embedded !== undefined) return embedded;
     const shown =
       s.length > 12000
         ? `${s.slice(0, 12000)}\n…（原始返回过长，已截断；完整内容长度 ${s.length} 字符）`
@@ -92,6 +95,24 @@ export type IncompleteResponseReason =
   | "stream_interrupted" | "invalid_response";
 
 /** 不保留响应正文或供应商错误原文；仅连接不完整允许在既有预算内重试。 */
+/**
+ * 搜索接口按关键词工作：把过长的模型输出压缩成可检索的短查询。
+ * 只保留前若干关键词，去掉标点与换行；正常短查询原样返回。
+ */
+export function normalizeQuery(raw: string): string {
+  const compact = raw.replace(/\s+/g, " ").trim();
+  if (compact.length <= 120) return compact;
+  // 超长时取开头与结尾的关键名词性片段，避免只剩“现有方案”这类泛词。
+  const head = compact.slice(0, 80);
+  const tokens = compact.split(/[\s，,。.；;：:、()（）【】\[\]"'“”]+/).filter((x) => x.length >= 2);
+  const picked: string[] = [];
+  for (const token of tokens) {
+    if (picked.join(" ").length >= 100) break;
+    if (!picked.includes(token)) picked.push(token);
+  }
+  return (picked.length ? picked.join(" ") : head).slice(0, 120);
+}
+
 export class IncompleteModelResponseError extends Error {
   readonly code = "INCOMPLETE_MODEL_RESPONSE";
   readonly retryable: boolean;
@@ -459,25 +480,30 @@ export class OfficialGateway implements ModelGateway {
         .join("\n"), response.stop_reason === "end_turn");
     }
     // 流式请求：长文生成时中转站（Cloudflare 等）在约 100 秒无数据后会返回 524；服务端不支持流式而直接返回 JSON 时照常解析。
+    // 524 也常表示“上游等待首个字节超时”，此时非流式反而更稳，因此 524 后降级重试一次。
     const base = (p.baseURL || "https://api.openai.com/v1").replace(/\/$/, "");
-    const res = await fetch(`${base}/chat/completions`, {
+    const request = (stream: boolean) => fetch(`${base}/chat/completions`, {
       method: "POST",
       signal,
       headers: {
         "content-type": "application/json",
-        accept: "text/event-stream, application/json",
+        accept: stream ? "text/event-stream, application/json" : "application/json",
         authorization: `Bearer ${key}`,
       },
       body: JSON.stringify({
         model: a.model,
-        stream: true,
+        stream,
         messages: [
           { role: "system", content: system },
           { role: "user", content: prompt },
         ],
       }),
     });
-    return this.responseText(res, metrics);
+    const res = await request(true);
+    if (res.status !== 524) return this.responseText(res, metrics);
+    // 先读完错误体释放连接，再用非流式重试；非流式不受中转站“无数据 100 秒”限制。
+    await res.text().catch(() => "");
+    return this.responseText(await request(false), metrics);
   }
   private async responseText(res: Response, metrics: AttemptUsage): Promise<string> {
     if (!res.ok) {
@@ -555,10 +581,13 @@ export class OfficialGateway implements ModelGateway {
     return text;
   }
   /** 未传 options 时只取一页且不限时间，供研究往届资料使用；赛事发现会传入配置的页数和时间范围。 */
-  async search(queryText: string, options: SearchOptions = {}) {
+  async search(rawQuery: string, options: SearchOptions = {}) {
     const search = searchSettings(this.cfg);
     if (search.provider === "sources")
       throw Error("来源列表模式未配置全网关键词搜索");
+    // 模型偶尔把整段方案正文当查询词；截成关键词片段既省配额也更容易有结果。
+    const queryText = normalizeQuery(rawQuery);
+    if (!queryText) throw Error("搜索词为空");
     const pages = options.pages ?? 1,
       timeRange = options.timeRange ?? "any";
     const found: SearchResult[] = [];
@@ -1029,4 +1058,33 @@ export class OfficialGateway implements ModelGateway {
       detail: "模型已成功响应",
     };
   }
+}
+
+/** 从夹带说明文字的返回里取出第一段完整 JSON 对象/数组；截断或损坏的 JSON 不会被修补。 */
+function embeddedJSON(text: string): unknown {
+  for (let start = 0; start < text.length; start++) {
+    const open = text[start];
+    if (open !== "{" && open !== "[") continue;
+    let depth = 0, quoted = false, escaped = false;
+    for (let i = start; i < text.length; i++) {
+      const ch = text[i]!;
+      if (quoted) {
+        if (escaped) escaped = false;
+        else if (ch === "\\") escaped = true;
+        else if (ch === '"') quoted = false;
+        continue;
+      }
+      if (ch === '"') quoted = true;
+      else if (ch === "{" || ch === "[") depth++;
+      else if (ch === "}" || ch === "]") {
+        if (--depth) continue;
+        try {
+          const value = JSON.parse(text.slice(start, i + 1));
+          if (value && typeof value === "object") return value;
+        } catch { /* 不是有效 JSON，继续找下一段 */ }
+        break;
+      }
+    }
+  }
+  return undefined;
 }

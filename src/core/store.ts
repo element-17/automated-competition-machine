@@ -2,6 +2,7 @@ import { DatabaseSync } from "node:sqlite";
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import type { Evidence, Job } from "./types.js";
+import { competitionCoreKey } from "../competition/dedupe.js";
 
 /** 租约所有者带进程号：进程已退出时租约立即失效，不必等满 5 分钟。 */
 export const leaseOwner = () => `${randomUUID()}:${process.pid}`;
@@ -504,6 +505,9 @@ export class Store {
       )
     )
       return false;
+    // 不同链接转发的同一场比赛：活跃队列有就不重复排队；已完成的非 redo 也不再排队。
+    if (this.activeCoreConflict(id)) return false;
+    if (!redo && this.finishedCoreConflict(id)) return false;
     const now = new Date().toISOString();
     return !!this.db
       .prepare("INSERT OR IGNORE INTO competition_queue VALUES(?,?,?,?,?,?,?)")
@@ -516,18 +520,57 @@ export class Store {
       .prepare("SELECT state FROM competition_queue WHERE competition_id=?")
       .get(id) as { state: string } | undefined;
     if (existing) return false;
+    // 同一场比赛常被多所学校转发：标题剥壳后相同就不再重复入候选。
+    if (this.activeCoreConflict(id)) return false;
     const now = new Date().toISOString();
     return !!this.db
       .prepare("INSERT OR IGNORE INTO competition_queue VALUES(?,?,?,?,?,?,?)")
       .run(id, "candidate", null, 0, now, now, null).changes;
   }
-  private queueSelect(search?: string) {
-    const where = search?.trim()
-      ? " WHERE instr(lower(c.title || ' ' || c.url), lower(?)) > 0"
-      : "";
+  /** 活跃队列（候选/等待处理/处理中）里同核心名的其他赛事；用于防止同一赛事经不同链接重复入队。 */
+  private activeCoreConflict(id: string): string | null {
+    const key = competitionCoreKey(this.competition(id).title);
+    if (!key) return null;
+    const rows = this.db
+      .prepare(
+        "SELECT q.competition_id AS cid, c.title FROM competition_queue q JOIN competitions c ON c.id=q.competition_id WHERE q.state IN ('candidate','queued','processing')",
+      )
+      .all() as { cid: string; title: string }[];
+    return (
+      rows.find(
+        (r) => r.cid !== id && competitionCoreKey(r.title) === key,
+      )?.cid || null
+    );
+  }
+  /** 已收尾（完成/暂停/停止）的同核心名赛事；防止另一链接的转发把已经做完的比赛再次排队。 */
+  private finishedCoreConflict(id: string): string | null {
+    const key = competitionCoreKey(this.competition(id).title);
+    if (!key) return null;
+    const rows = this.db
+      .prepare(
+        "SELECT q.competition_id AS cid, c.title FROM competition_queue q JOIN competitions c ON c.id=q.competition_id WHERE q.state IN ('completed','paused','stopped')",
+      )
+      .all() as { cid: string; title: string }[];
+    return (
+      rows.find(
+        (r) => r.cid !== id && competitionCoreKey(r.title) === key,
+      )?.cid || null
+    );
+  }
+  private queueSelect(search?: string, reviewStatus?: string) {
+    const clauses: string[] = [],
+      params: string[] = [];
+    if (search?.trim()) {
+      clauses.push("instr(lower(c.title || ' ' || c.url), lower(?)) > 0");
+      params.push(search.trim());
+    }
+    if (reviewStatus) {
+      clauses.push("COALESCE(r.decision,'unreviewed') = ?");
+      params.push(reviewStatus);
+    }
     return {
-      sql: `FROM competition_queue q JOIN competitions c ON c.id=q.competition_id LEFT JOIN queue_reviews r ON r.competition_id=q.competition_id${where}`,
-      params: search?.trim() ? [search.trim()] : [],
+      sql: `FROM competition_queue q JOIN competitions c ON c.id=q.competition_id LEFT JOIN queue_reviews r ON r.competition_id=q.competition_id${clauses.length ? ` WHERE ${clauses.join(" AND ")}` : ""}`,
+      params,
     };
   }
   queue() {
@@ -584,7 +627,7 @@ export class Store {
       ).count,
     );
   }
-  queuePage(limit: number, offset: number, search?: string) {
+  queuePage(limit: number, offset: number, search?: string, reviewStatus?: string) {
     if (
       !Number.isInteger(limit) ||
       limit < 1 ||
@@ -592,15 +635,15 @@ export class Store {
       offset < 0
     )
       throw Error("队列分页参数无效");
-    const base = this.queueSelect(search);
+    const base = this.queueSelect(search, reviewStatus);
     return this.db
       .prepare(
         `SELECT q.competition_id AS competitionId,c.title,c.url,q.state,q.job_id AS jobId,q.added_at AS addedAt,q.updated_at AS updatedAt,q.error,COALESCE(r.decision,'unreviewed') AS reviewStatus,r.reason AS reviewReason,r.source_url AS reviewUrl,r.quote AS reviewQuote,r.deadline AS reviewDeadline,r.reviewer AS reviewedBy,r.reviewed_at AS reviewedAt ${base.sql} ORDER BY q.added_at,q.rowid LIMIT ? OFFSET ?`,
       )
       .all(...base.params, limit, offset);
   }
-  queueCount(search?: string) {
-    const base = this.queueSelect(search);
+  queueCount(search?: string, reviewStatus?: string) {
+    const base = this.queueSelect(search, reviewStatus);
     return Number(
       (
         this.db

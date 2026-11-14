@@ -128,7 +128,7 @@ export type TemplateInspection = {
  * 1. docxtemplater 占位符（{字段}）；
  * 2. 常见报名表结构——标签单元格（“团队名称：”）后紧跟一个空单元格。
  */
-export function inspectTemplate(data: Buffer): TemplateInspection {
+export function inspectTemplate(data: Buffer, strict = true): TemplateInspection {
   const zip = new PizZip(data);
   const file = zip.file("word/document.xml");
   if (!file) throw Error("官方模板缺少正文");
@@ -140,10 +140,13 @@ export function inspectTemplate(data: Buffer): TemplateInspection {
       modules: [inspector],
       paragraphLoop: true,
       linebreaks: true,
+      // 普通作品里的花括号解析失败是预期情况，不往终端打印整段错误堆栈。
+      errorLogging: strict,
     });
     tags = Object.keys(inspector.getAllTags() as Record<string, unknown>);
   } catch (e) {
-    throw Error(`官方模板字段无法解析：${e instanceof Error ? e.message : String(e)}`);
+    // 普通作品正文里的花括号（公式、代码）不是模板占位符；只有官方模板才要求占位符可解析。
+    if (strict) throw Error(`官方模板字段无法解析：${e instanceof Error ? e.message : String(e)}`);
   }
   const slots: TemplateSlot[] = [];
   const fieldValues: Record<string, string[]> = {};

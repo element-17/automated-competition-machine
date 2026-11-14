@@ -7,6 +7,7 @@ import { searchLogged, fetchDocument } from "./sources.js";
 import { z } from "zod";
 import { parseJSON } from "../core/gateway.js";
 import { todayChina } from "./screening.js";
+import { competitionCoreKey } from "./dedupe.js";
 import { guards } from "../agents/prompts.js";
 
 export const isCompetitionCandidate = (title: string) =>
@@ -300,7 +301,8 @@ export async function discoverCompetitions(
   }
   // 各列表轮流取结果；每个网站本次最多新增 perHost 场，同一届赛事只保留第一条公告。已入库的赛事不占名额。
   const known = new Map<string, string>(),
-    keys = new Map<string, string>();
+    keys = new Map<string, string>(),
+    cores = new Map<string, string>();
   for (const c of store.list() as {
     id: string;
     url: string;
@@ -309,6 +311,9 @@ export async function discoverCompetitions(
     known.set(c.url, c.id);
     const k = competitionKey(c.title);
     if (k && !keys.has(k)) keys.set(k, c.url);
+    // 无届次的标题靠剥壳核心名合并：“关于举办……的通知”换个网站发布不算新赛事。
+    const core = competitionCoreKey(c.title);
+    if (core && !cores.has(core)) cores.set(core, c.url);
   }
   // 同 URL 本次只初筛一次；历史决定仅在指纹匹配且未到期时复用。
   if (settings.screen) {
@@ -347,12 +352,15 @@ export async function discoverCompetitions(
         continue;
       }
       const site = siteOf(url),
-        key = competitionKey(r.title);
+        key = competitionKey(r.title),
+        core = competitionCoreKey(r.title);
       if ((perSite.get(site) || 0) >= settings.perHost) continue;
       if (key && keys.has(key) && keys.get(key) !== url) continue;
+      if (core && cores.has(core) && cores.get(core) !== url) continue;
       const id = store.addCompetition(url, r.title);
       known.set(url, id);
       if (key) keys.set(key, url);
+      if (core) cores.set(core, url);
       perSite.set(site, (perSite.get(site) || 0) + 1);
       ids.push(id);
     }

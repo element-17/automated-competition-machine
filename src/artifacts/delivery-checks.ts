@@ -5,6 +5,7 @@ import sharp from "sharp";
 import type { Brief } from "../core/types.js";
 import { readSource } from "../competition/sources.js";
 import { hasFieldValue, inspectTemplate } from "./templates.js";
+import { readXlsx, xlsxText } from "./xlsx.js";
 
 export type RequirementCheck = {
   id: string;
@@ -26,6 +27,9 @@ export type ArtifactMetrics = {
   width?: number;
   height?: number;
   entries?: string[];
+  /** 工作簿的工作表数与总数据行数（xlsx）。 */
+  sheets?: number;
+  rows?: number;
   /** Word 文档里实际存在的栏目标签（“团队名称：”），用于核对报名表字段。 */
   fields?: string[];
   /** 按真实标签位置读取的值；存在栏目不等于已经填写。 */
@@ -225,9 +229,26 @@ export async function measureArtifact(path: string): Promise<ArtifactMetrics> {
       result.width = info.width;
       result.height = info.height;
     }
+    // xlsx 必须能被真实解析成 OOXML 工作簿；改名冒充的 CSV/HTML 在这里直接报错。
+    if (ext === ".xlsx") {
+      const workbook = await readXlsx(await readFile(path));
+      result.sheets = workbook.sheets.length;
+      result.rows = workbook.sheets.reduce((sum, s) => sum + s.rows.length, 0);
+      result.text = xlsxText(workbook);
+      result.characters = Array.from(result.text.replace(/\s/gu, "")).length;
+      // 首工作表的表头行作为可核对栏目（“需填写学校、学院…”），值取首条数据行。
+      const header = workbook.sheets[0]?.rows[0] || [];
+      const dataRow = workbook.sheets[0]?.rows[1] || [];
+      result.fields = header.filter((h) => h.trim());
+      result.fieldValues = Object.fromEntries(
+        header
+          .map((h, i): [string, string[]] => [h.trim(), [dataRow[i] || ""]])
+          .filter(([h]) => h),
+      );
+    }
     // 报名表类规则常写成“需填写团队名称、参赛赛题和所在赛区”，用文档里的实际标签逐项核对。
     if (ext === ".docx") {
-      const inspection = inspectTemplate(await readFile(path));
+      const inspection = inspectTemplate(await readFile(path), false);
       result.fields = inspection.labels;
       result.fieldValues = inspection.fieldValues;
     }
@@ -291,8 +312,9 @@ function parseFieldRules(rule: string, available: string[]): FieldRule[] | null 
   return [...new Map(result.map((x) => [x.name, { ...x, mode: optional.has(x.name) ? "optional" as const : x.mode }])).values()];
 }
 const fieldAliases = [
-  ["姓名", "作者姓名", "参赛者姓名", "学生姓名"],
-  ["联系电话", "电话", "手机", "手机号", "手机号码"],
+  ["姓名", "作者姓名", "参赛者姓名", "学生姓名", "作者", "参赛者", "署名"],
+  ["联系电话", "电话", "手机", "手机号", "手机号码", "联系方式"],
+  ["学校", "所在学校", "学校名称", "就读学校", "院校"],
   ["邮箱", "电子邮箱", "邮件"],
   ["通讯地址", "联系地址", "地址"],
 ];

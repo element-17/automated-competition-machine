@@ -4,16 +4,16 @@
  */
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { extname, join } from "node:path";
 import { promisify } from "node:util";
-import { load } from "cheerio";
 import { z } from "zod";
 import type { ModelGateway } from "../core/types.js";
 import { parseJSON } from "../core/gateway.js";
 import { isJobControlError } from "../core/job-control.js";
 import { budgetError } from "../workflows/shared.js";
+import { renderers, textCoverage, type RenderedDoc } from "./doc-render.js";
 
 const exec = promisify(execFile);
 const officecli = () => process.env.COMPETE_OFFICECLI || "officecli";
@@ -37,9 +37,9 @@ export type LayoutReport = {
   failedPages: number[];
   /** 全部真实页面已完成视觉评审；缺陷看 issues，逐字完整性看 textCoverage。 */
   complete: boolean;
-  textCoverage: "unverified" | "not_applicable";
+  /** Word：渲染页面的文字与文档原文逐段比对的结果；幻灯片不适用。 */
+  textCoverage: "verified" | "mismatch" | "unverified" | "not_applicable";
   textCoverageDetails: string;
-  auxiliaryText?: { status: "matched" | "mismatch"; details: string };
   criteria?: {
     criterion: number;
     status: "passed" | "failed" | "unverified";
@@ -84,7 +84,7 @@ function pageOutOfRange(error: unknown, page: number): boolean {
 async function shot(file: string, page: number, out: string): Promise<boolean> {
   try {
     await exec(officecli(), ["view", file, "screenshot", "--page", String(page), "-o", out,
-      ...(extname(file).toLowerCase() === ".docx" ? ["--render", "native"] : [])], {
+    ], {
       timeout: 90_000, windowsHide: true, maxBuffer: 4_000_000,
     });
   } catch (e) {
@@ -97,15 +97,14 @@ async function shot(file: string, page: number, out: string): Promise<boolean> {
 
 const docxRubric = `任务：排版审查。现在看到的是 Word 文档渲染后的真实页面（长文档会分页，看到的是其中一页）。只指出肉眼可见、会影响阅读的版面缺陷：Markdown 表格符号（竖线、横线）被当成普通文字显示而没有变成表格；单独成行的分隔线或代码围栏符号；星号、井号等未转换的 Markdown 标记；标题层级在字号和缩进上明显不连贯；文字溢出页面边界、元素互相重叠或在页面中间被裁掉；图片缺失、位置错乱或没有图题；同类元素样式明显不统一。
 
-不要仅根据“这一页最后一行是不是半句话”判断内容被截断：分页可以断在句子中间。需检查实际可见的文字被裁切、重叠、异常空页和最后一页明显丢件；不能据此声称已逐字核对全文。程序另有辅助文本检查，但不同渲染后端的文本不证明截图完整。
+分页可以断在句子中间：某一页最后一行停在半句、下一页接着写是正常现象，不是缺陷，也不要据此判断内容被截断；全文文字是否完整由程序逐字比对，不需要你判断。只检查这一页上实际可见的问题：文字被裁切、重叠、异常的大片空白或空页。最后一页内容较少、下方留白是正常的。
 
 不评价内容质量，不因措辞、标点或个人偏好提意见。每条写清楚现象和改法，最多 5 条，没有缺陷时 issues 为空数组。只输出 JSON {"issues":["阻塞版面缺陷"],"suggestions":["可选改进"]}。`;
 const pptxRubric = `任务：幻灯片版面审查。现在看到的是 PPT 渲染后的真实一页。只指出肉眼可见、会影响观感的版面缺陷：文字溢出页面或文本框、文字互相重叠、文字与图片重叠遮挡；元素明显越界或被裁掉；同一页字号、颜色、对齐混乱；标题缺失或每页位置不一致；图片拉伸变形、模糊或占位失败；整页几乎空白或文字小到看不清。不评价内容观点和措辞。每条写清楚现象和改法，最多 5 条，没有缺陷时 issues 为空数组。只输出 JSON {"issues":["阻塞版面缺陷"],"suggestions":["可选改进"]}。`;
 
-/** Word 显式重分页，与原生截图使用同一后端；PPT 由 stats 提供真实页数。 */
+/** PPT 由 stats 提供真实页数；Word 的页数来自渲染出的 PDF，不走这里。 */
 async function pageCount(file: string): Promise<number | null> {
-  const { stdout } = await exec(officecli(), ["view", file, "stats",
-    ...(extname(file).toLowerCase() === ".docx" ? ["--page-count"] : [])], {
+  const { stdout } = await exec(officecli(), ["view", file, "stats"], {
     timeout: 60_000,
     windowsHide: true,
     maxBuffer: 2_000_000,
@@ -126,15 +125,18 @@ export async function checkLayout(
   file: string,
   pages?: number[],
   criteria?: { criterion: number; requirement: string }[],
+  render: (file: string) => Promise<RenderedDoc> = renderers.docx,
 ): Promise<LayoutReport> {
+  const isDocx = extname(file).toLowerCase() === ".docx";
   const report: LayoutReport = {
     issues: [], suggestions: [], checked: 0, totalPages: null,
     checkedPages: [], failedPages: [], complete: false,
-    textCoverage: extname(file).toLowerCase() === ".docx" ? "unverified" : "not_applicable",
-    textCoverageDetails: extname(file).toLowerCase() === ".docx"
-      ? "原生截图逐页视觉检查；未从这些截图逐字提取全文，HTML文字比对仅为辅助证据"
+    textCoverage: isDocx ? "unverified" : "not_applicable",
+    textCoverageDetails: isDocx
+      ? "尚未完成渲染页面与文档原文的文字比对"
       : "幻灯片由逐页视觉检查核验，不做Word全文比对",
   };
+  let rendered: RenderedDoc | undefined;
   const requested = criteria || [];
   const observations = new Map<number, z.infer<typeof Criterion>[]>();
   const summarize = () => {
@@ -158,10 +160,14 @@ export async function checkLayout(
     if (requested.some((x) => !Number.isSafeInteger(x.criterion) || x.criterion < 0 || !x.requirement.trim()) ||
         new Set(requested.map((x) => x.criterion)).size !== requested.length)
       throw Error("视觉标准编号必须唯一且要求不能为空");
-    await requireOffice();
+    if (!isDocx) await requireOffice();
     const sharp = (await import("sharp")).default;
     dir = await mkdtemp(join(tmpdir(), "layout-"));
-    const reported = await pageCount(file);
+    // Word：页数、截图和文字都来自同一份渲染出的 PDF，不会出现统计页数与可截图页数不一致。
+    if (isDocx) rendered = await render(file);
+    const reported = rendered ? rendered.pages : await pageCount(file);
+    if (reported !== null && (!Number.isSafeInteger(reported) || reported < 1))
+      throw Error("文档没有可渲染页面");
     report.totalPages = reported;
     if (reported !== null && reported > maxPages)
       throw Error(`文档共 ${reported} 页，超过单次可检查页数 ${maxPages}，未完成检查`);
@@ -174,7 +180,9 @@ export async function checkLayout(
     for (const page of targets) {
       const out = join(dir, `p${page}.png`);
       try {
-        const exists = await shot(file, page, out);
+        if (rendered) await writeFile(out, await rendered.png(page));
+        const exists = rendered ? true : await shot(file, page, out);
+        if (rendered && !(await readFile(out)).length) throw Error(`渲染 ${file} 第 ${page} 页生成空图片`);
         if (!exists) {
           if (reported !== null) throw Error(`总页数为 ${reported}，请求第 ${page} 页却返回越界`);
           if (page === 1) throw Error("文档没有可渲染页面");
@@ -212,7 +220,7 @@ export async function checkLayout(
       }
       try {
         const jpeg = await sharp(await readFile(out)).jpeg({ quality: 85 }).toBuffer();
-        const rubric = extname(file).toLowerCase() === ".pptx" ? pptxRubric : docxRubric;
+        const rubric = isDocx ? docxRubric : pptxRubric;
         const criterionPrompt = requested.length
           ? `\n同时核验这些视觉标准：${JSON.stringify(requested)}。在 JSON 中增加 criteria 数组，每项含 criterion、status、evidence。status 为 passed/failed/unverified/not_applicable；只按本页实际证据判断。不适用于本页的项用 not_applicable 并说明原因，无法判断用 unverified，禁止无证据通过。每个编号恰好出现一次。`
           : "";
@@ -241,14 +249,14 @@ export async function checkLayout(
     }
     if (failures.length) throw Error(failures.join("；"));
     if (!report.checked) throw Error("没有成功检查任何一页");
-    // HTML 与原生截图不是同一个后端，只记录整篇辅助比对，不能拿它证明原生截图逐字完整。
-    if (extname(file).toLowerCase() === ".docx") {
-      const loss = await renderedTextGap(file);
-      report.auxiliaryText = {
-        status: loss ? "mismatch" : "matched",
-        details: loss || "整篇HTML包含原文核验片段；此结果仅为辅助，不证明原生截图逐字完整",
-      };
-      if (loss) report.suggestions.push(`辅助HTML文本比对差异：${loss}；需结合原生页面复核，不据此判定原生截图缺字`);
+    // 渲染页面上的文字与文档原文比对：结尾或大段缺失是明确的丢内容，阻塞交付。
+    if (rendered) {
+      const { readSource } = await import("../competition/sources.js");
+      const coverage = textCoverage(await readSource(file), rendered.text);
+      report.textCoverage = coverage.status;
+      report.textCoverageDetails = coverage.details;
+      if (coverage.blocking) report.issues.push(coverage.details);
+      else if (coverage.status === "mismatch") report.suggestions.push(coverage.details);
     }
     report.complete = total !== null && range(total).every((page) => report.checkedPages.includes(page));
     if (!report.complete) report.issues.push(`版面检查未完整覆盖：总 ${total} 页，已检 ${report.checkedPages.join("、")} 页`);
@@ -265,9 +273,10 @@ export async function checkLayout(
     summarize();
     throw Object.assign(Error(`版面检查失败：${message}（总页数 ${report.totalPages ?? "未知"}；已检页 ${report.checkedPages.join("、") || "无"}；失败页 ${report.failedPages.join("、") || "未定位"}）`), { report });
   } finally {
+    await rendered?.dispose();
     if (dir) {
       // 清理失败不会覆盖真正的审查错误；原始文档从不删除。
-      await exec(officecli(), ["close", file], { timeout: 30_000, windowsHide: true }).catch(() => {});
+      if (!isDocx) await exec(officecli(), ["close", file], { timeout: 30_000, windowsHide: true }).catch(() => {});
       await rm(dir, { recursive: true, force: true }).catch(() => {});
     }
   }
@@ -275,38 +284,3 @@ export async function checkLayout(
 const range = (n: number) => Array.from({ length: n }, (_, i) => i + 1);
 /** 防止损坏文档无限探测；达到上限必须显式失败。 */
 const maxPages = 500;
-
-/** 读取整篇辅助HTML。静态源含脚本，必须去掉非正文节点，不能按原生页数截取。 */
-async function renderedText(file: string): Promise<string> {
-  try {
-    const { stdout } = await exec(
-      officecli(),
-      ["view", file, "html"],
-      { timeout: 60_000, windowsHide: true, maxBuffer: 16_000_000 },
-    );
-    if (!/<(?:html|body|div|p|span|table)\b/i.test(stdout)) throw Error("渲染器未返回页面 HTML");
-    const $ = load(stdout);
-    $("script,style,noscript,template").remove();
-    return $("body").text().replace(/\s+/g, "");
-  } catch (e) {
-    throw Error(`全文辅助渲染检查失败：${e instanceof Error ? e.message : String(e)}`);
-  }
-}
-
-/** 整篇HTML辅助对比原文；不同后端的差异只报告，不能证明原生截图丢字或完整。 */
-async function renderedTextGap(file: string): Promise<string | null> {
-  const { readSource } = await import("../competition/sources.js");
-  const full = (await readSource(file)).replace(/\s+/g, "");
-  const rendered = await renderedText(file);
-  if (full && !rendered) throw Error("全文渲染检查未提取到任何可见文字");
-  if (!full || rendered.includes(full)) return null;
-  if (full.length < 200) return "渲染出的页面没有包含完整正文，需要调整段落或分页设置后重新导出";
-  // 末尾 24 字是判断“是否丢了结尾”的最短可靠依据。
-  const tail = full.slice(-24);
-  if (rendered.includes(tail)) return null;
-  // 结尾找不到时再确认中后段是否也缺失，避免只因为空格/字符差异误判。
-  const probe = full.slice(Math.floor(full.length * 0.8), Math.floor(full.length * 0.8) + 24);
-  if (probe && !rendered.includes(probe))
-    return `渲染出的页面没有包含文档后段内容（文档共 ${full.length} 字，渲染约 ${rendered.length} 字）：分页时丢失了末尾内容，需要调整段落或分页设置后重新导出`;
-  return `渲染出的最后一页缺少文档结尾（“${tail}”）：分页时把结尾挤出了页面，需要调整段落或分页设置后重新导出`;
-}

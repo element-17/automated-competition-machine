@@ -315,7 +315,7 @@ export function assessTextReuse(text: string, references: TextReuseReference[], 
     if (!result.usableReferenceCount) { result.reason = "参考为空或均不足 80 个规范化字符，没有足够参考可核实长片段复用。"; return result; }
     result.complete = true;
     if (result.comparedCharacters >= T.minBlockComparedCharacters && result.matchedCharacters >= T.blockMatchedCharacters && result.coverage >= T.blockCoverage) {
-      result.status = "blocked"; result.reason = "未标注正文存在显著大量的实际连续复用，达到高复用风险阻塞阈值；请核查来源、引用边界及实质贡献。";
+      result.status = "blocked"; result.reason = "发现较多连续相同文本，标为高复用线索；结合引用、固定表述与实际内容判断，不据此自动返工或拒绝交付。";
     } else if (result.excludedCharacters / result.normalizedCharacters >= T.maxExcludedCoverageForClear) {
       result.status = "unverified"; result.reason = "至少一半正文被引用标记或固定文本排除，剩余比较不足以给出全文低复用风险结论。";
     } else if (result.matches.length) {

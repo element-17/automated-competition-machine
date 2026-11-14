@@ -6,6 +6,7 @@ import JSZip from "jszip";
 import type { AppConfig } from "../core/config.js";
 import type { Store } from "../core/store.js";
 import { readSource } from "../competition/sources.js";
+import { readXlsx, xlsxText } from "../artifacts/xlsx.js";
 import { atomicWriteJson } from "./task-receipts.js";
 import { assessTextReuse, textReuseNotApplicable, type TextReuseReference, type TextReuseReport } from "./originality.js";
 
@@ -37,6 +38,7 @@ async function contained(root: string, path: string): Promise<string> {
 async function artifactText(path: string): Promise<string | null> {
   const ext = extname(path).toLowerCase();
   if ([".txt", ".md", ".docx", ".pdf"].includes(ext)) return readSource(path);
+  if (ext === ".xlsx") return xlsxText(await readXlsx(await readFile(path)));
   if (ext !== ".pptx") return null;
   const zip = await JSZip.loadAsync(await readFile(path));
   const entries = Object.values(zip.files).filter((f) => /^ppt\/slides\/slide\d+\.xml$/.test(f.name))
@@ -89,7 +91,7 @@ export async function auditTextReuse(input: ReuseAuditInput): Promise<TextReuseR
     const history = store.recentSubmissionArtifacts(jobId, 21);
     if (history.length > 20) { complete = false; limitations.push("本地历史仅比较最近20个交付文件，较早文件未扫描"); }
     for (const previous of history.slice(0, 20)) {
-      if (![".txt", ".md", ".docx", ".pdf", ".pptx"].includes(extname(previous.path).toLowerCase())) continue;
+      if (![".txt", ".md", ".docx", ".pdf", ".pptx", ".xlsx"].includes(extname(previous.path).toLowerCase())) continue;
       try {
         const actual = await contained(join(cfg.dataDir, "jobs", previous.jobId), previous.path);
         const text = await artifactText(actual);

@@ -367,18 +367,21 @@ export function researchGraph(
         if (before !== brief.research[key].length)
           brief.research.missing.push(`${key} 部分证据无法逐字核对，已剔除`);
       }
+      // 同一赛事可能多轮分析：缺口按语义去重后写回，避免提示词里堆出十条相同内容。
+      const missingGaps: string[] = [];
       if (!brief.research.past_winners.length)
-        brief.research.missing.push("尚未找到可核对的往届获奖名单");
+        missingGaps.push("尚未找到可核对的往届获奖名单");
       if (!brief.research.past_works.length)
-        brief.research.missing.push(
-          "尚未找到可核对的往届完整作品或展示；不能判断创新性",
-        );
+        missingGaps.push("尚未找到可核对的往届完整作品或展示；不能判断创新性");
       if (!brief.research.judging.length)
-        brief.research.missing.push("尚未找到可核对的评分细则");
+        missingGaps.push("尚未找到可核对的评分细则");
       if (gateway.canSearch === false)
-        brief.research.missing.push(
+        missingGaps.push(
           "未配置全网关键词搜索，往届作品与相似方案检索范围受限",
         );
+      brief.research.missing = [
+        ...new Set([...brief.research.missing, ...missingGaps]),
+      ];
       for (const field of ["eligibility", "deadline", "ai_rules", "scoring"])
         if (
           brief[field as keyof typeof brief] &&

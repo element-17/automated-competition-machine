@@ -22,7 +22,7 @@ import {
   type Choice,
 } from "./concepts.js";
 import { saveJobProgress } from "../core/job-progress.js";
-import { CONCEPT_ROUTES, conceptFingerprint, DuplicateCandidatesError } from "./concept-quality.js";
+import { conceptRoutes, conceptFingerprint, DuplicateCandidatesError } from "./concept-quality.js";
 import {
   Guard,
   Idea,
@@ -55,27 +55,6 @@ const AutoState = Annotation.Root({
   resultPath: Annotation<string>,
 });
 type State = typeof AutoState.State;
-
-/** 仅用于提示可能重复，不能作为原创性的最终裁决。 */
-export function conceptSimilarity(
-  a: z.infer<typeof Idea>,
-  b: z.infer<typeof Idea>,
-): number {
-  const features = (x: z.infer<typeof Idea>) => {
-    const text = `${x.audience} ${x.problem} ${x.mechanism}`
-      .toLowerCase()
-      .replace(/[^\p{L}\p{N}]/gu, "");
-    const grams = new Set<string>();
-    for (let i = 0; i < text.length - 1; i++) grams.add(text.slice(i, i + 2));
-    return grams;
-  };
-  const left = features(a),
-    right = features(b);
-  if (!left.size || !right.size) return 0;
-  let common = 0;
-  for (const g of left) if (right.has(g)) common++;
-  return common / (left.size + right.size - common);
-}
 
 export function autonomousGraph(
   cfg: AppConfig,
@@ -161,13 +140,13 @@ export function autonomousGraph(
       const { research: _research, ...independentBrief } = brief;
       const ideas = [];
       const branches = await Promise.allSettled(
-        CONCEPT_ROUTES.map(async (angle, index) => {
+        conceptRoutes(brief).map(async (angle, index) => {
           return cached(
             cfg, store, s.jobId, `concept-${index + 1}.json`, Idea,
             modelLabel(cfg, "writer"),
             async () => parseJSON(await gateway.generate(
               "writer",
-              `${Guard}\n为以下比赛独立提出一个作品方案，本分支视角：${angle}。必须落实本分支指定的场景约束、工作机制和验证方法，不能只换标题或领域标签。方案应适配比赛类型；非技术作品也必须说明材料选择、论证/叙事过程和验证方法，不得硬套 AI 平台。只输出 JSON {"title":"","audience":"具体用户与使用场景、资源约束","problem":"具体痛点；未经证实需求标为假设","mechanism":"输入—处理/行动—输出，核心因果过程、替代方案及明确取舍","verification":"执行步骤、基线、指标、失败条件和所需材料","evidence_urls":[]}。未知效果不得写成已实测。evidence_urls 只允许本次资料已获取的 URL，无依据留空。规则：${JSON.stringify(independentBrief)}\n资料：${JSON.stringify(neutral)}`,
+              `${Guard}\n为以下比赛独立提出一个作品方案，本分支视角：${angle}。按比赛类型发展一个具体、有用的方向。技术方案说明场景约束、工作机制和验证方法；非技术作品按创作语境说明主题、材料、叙事或视觉组织，以及事实核对或受众理解，不强塞技术流程、基线或消融实验。只输出 JSON {"title":"","audience":"受众与场景","problem":"要解决的问题或表达的主题","mechanism":"具体做法或表达结构","verification":"适合本作品的检查或验证方式","evidence_urls":[]}。未知效果不得写成已实测。evidence_urls 只允许本次资料已获取的 URL，无依据留空。规则：${JSON.stringify(independentBrief)}\n资料：${JSON.stringify(neutral)}`,
               "writer",
             )),
           );
@@ -222,35 +201,26 @@ export function autonomousGraph(
       let candidateEvidence = s.candidateEvidence || [];
       const brief = store.competition(s.competitionId).brief as Brief;
       const { research: _research, ...rewriteBrief } = brief;
-      for (let round = 0; round <= 2; round++) {
-        const pairs = [];
-        for (let i = 0; i < ideas.length; i++)
-          for (let j = i + 1; j < ideas.length; j++)
-            pairs.push({ left: i + 1, right: j + 1, lexical_similarity: conceptSimilarity(ideas[i]!, ideas[j]!) });
-        await record(cfg, store, s.jobId, "concept-diversity.json", pairs, null);
+      for (let round = 0; round <= 1; round++) {
         try {
-          const result = await compareCandidates(cfg, store, gateway, s.jobId, brief, ideas, candidateEvidence, pairs);
+          const result = await compareCandidates(cfg, store, gateway, s.jobId, brief, ideas, candidateEvidence);
           await record(cfg, store, s.jobId, "concepts.json", ideas, modelLabel(cfg, "writer"));
           return { ...result, ideas, candidateEvidence };
         } catch (e) {
           if (!(e instanceof DuplicateCandidatesError)) throw e;
-          if (round === 2) throw Error(`候选方案比较失败：已完成2轮定向重写，仍有实质重复；${e.message}`);
-          const before = ideas;
-          const branches = await Promise.allSettled(e.rewrites.map(async (rewrite) => {
-            const fingerprint = conceptFingerprint({ version: 1, round, before, rewrite, brief: rewriteBrief });
-            const idea = await cached(cfg, store, s.jobId, `concept-rewrite-${rewrite.candidate}-${fingerprint}.json`, Idea, modelLabel(cfg, "writer"), async () => parseJSON(await gateway.generate(
-              "writer",
-              `${Guard}\n任务：定向重写重复候选。仅重写候选 ${rewrite.candidate}，其他候选保持不变。必须改变实质工作机制及相应场景约束、验证方法，不允许换标题/领域标签后复用原机制；往届作品只用于比较，不能用作正文模板。不虚构事实、实测结果或引用。返回与 Idea 相同的 JSON 字段 title,audience,problem,mechanism,verification,evidence_urls；无已获取来源可引时 evidence_urls 留空。\n具体重复依据与重写要求：${rewrite.instructions}\n规则：${JSON.stringify(rewriteBrief)}\n待改候选：${JSON.stringify(before[rewrite.candidate - 1])}\n必须避开的其他候选机制：${JSON.stringify(before.map((idea, index) => ({ candidate: index + 1, mechanism: idea.mechanism })).filter((idea) => idea.candidate !== rewrite.candidate))}`,
-              "writer",
-            )));
-            return { candidate: rewrite.candidate, idea };
-          }));
-          const failure = branches.find((b): b is PromiseRejectedResult => b.status === "rejected" && (isJobControlError(b.reason) || budgetError(b.reason)))
-            || branches.find((b): b is PromiseRejectedResult => b.status === "rejected");
-          if (failure) throw failure.reason;
-          ideas = [...before];
-          for (const branch of branches) if (branch.status === "fulfilled") ideas[branch.value.candidate - 1] = branch.value.idea;
-          // 未改候选保留原证据；变更候选重新检索，成功查询及 URL 正文依然按指纹复用。
+          if (round === 1) throw Error(`候选方案比较失败：已完成1轮定向修正，所选方案仍有明确核心雷同；${e.message}`);
+          const rewrite = e.rewrites[0]!;
+          const fingerprint = conceptFingerprint({ version: 2, ideas, rewrite, brief: rewriteBrief });
+          const idea = await cached(cfg, store, s.jobId, `concept-rewrite-${rewrite.candidate}-${fingerprint}.json`, Idea, modelLabel(cfg, "writer"), async () => parseJSON(await gateway.generate(
+            "writer",
+            `${Guard}
+任务：定向重写重复候选。仅重写候选 ${rewrite.candidate}，解决下面明确的核心雷同，保留已有价值，其他候选无需返工。这是唯一一轮修正，不要求证明绝对原创。技术方案改进实际做法，非技术作品按主题、材料和表达结构改进。不虚构事实或实测结果。返回 JSON 字段 title,audience,problem,mechanism,verification,evidence_urls。
+具体重复依据与重写要求：${rewrite.instructions}
+规则：${JSON.stringify(rewriteBrief)}
+待改候选：${JSON.stringify(ideas[rewrite.candidate - 1])}`,
+            "writer",
+          )));
+          ideas[rewrite.candidate - 1] = idea;
           candidateEvidence = await collectCandidateEvidence(cfg, store, gateway, s.jobId, s.competitionId, ideas, candidateEvidence);
         }
       }
