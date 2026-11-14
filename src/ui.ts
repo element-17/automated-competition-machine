@@ -979,7 +979,7 @@ async function manual(store: Store) {
         {
           value: "invalid",
           label: "无效",
-          hint: "候选直接丢弃；已入处理队列的保留但不再处理",
+          hint: "丢弃：候选和未领取的排队项移出队列；已处理过的保留记录",
         },
         { value: "needs_review", label: "继续待确认" },
       ],

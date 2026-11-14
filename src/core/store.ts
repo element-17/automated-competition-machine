@@ -717,9 +717,14 @@ export class Store {
     try {
       const row = this.db
         .prepare(
-          "SELECT c.url,c.title,q.state FROM competition_queue q JOIN competitions c ON c.id=q.competition_id WHERE q.competition_id=?",
+          "SELECT c.url,c.title,q.state,q.job_id AS jobId FROM competition_queue q JOIN competitions c ON c.id=q.competition_id WHERE q.competition_id=?",
         )
-        .get(id) as { url: string; title: string; state: string } | undefined;
+        .get(id) as {
+        url: string;
+        title: string;
+        state: string;
+        jobId: string | null;
+      } | undefined;
       if (!row) throw Error("赛事不在队列中");
       if (row.state === "processing")
         throw Error("赛事正在处理中，不能修改审核结果");
@@ -751,7 +756,13 @@ export class Store {
             "UPDATE competition_queue SET state='queued',updated_at=?,error=NULL WHERE competition_id=?",
           )
           .run(now, id);
-      else if (row.state === "candidate" && review.decision === "invalid")
+      else if (
+        (row.state === "candidate" || row.state === "queued") &&
+        !row.jobId &&
+        review.decision === "invalid"
+      )
+        // 审核没过就丢：候选和还没被领取的排队项直接移出队列；
+        // 已领取或已结束的保留队列记录，作品与历史不受影响。
         this.db
           .prepare("DELETE FROM competition_queue WHERE competition_id=?")
           .run(id);

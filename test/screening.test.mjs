@@ -74,7 +74,12 @@ test("审核逐字核对证据、持久化结果，并阻止未通过赛事进�
       "queued",
     );
     assert.equal(
-      store.queue().find((x) => x.competitionId === expired).reviewStatus,
+      store.queue().find((x) => x.competitionId === expired),
+      undefined,
+      "审核没过就丢：过期无效的排队项已移出队列",
+    );
+    assert.equal(
+      store.queueReviewHistory(expired).slice(-1)[0].decision,
       "invalid",
     );
   } finally {
@@ -163,9 +168,15 @@ test("已过截止时间或仅有比赛时间的审核结果不会进入制作",
       },
     });
     assert.equal(result.length, 0);
+    // 审核没过就丢：过期的排队项移出队列；依据不足的保留待人工确认
     assert.deepEqual(
       store.queue().map((x) => x.reviewStatus),
-      ["invalid", "needs_review"],
+      ["needs_review"],
+    );
+    assert.equal(
+      store.queueReviewHistory(expired).slice(-1)[0].decision,
+      "invalid",
+      "过期改判记录保留在审核历史",
     );
   } finally {
     store.close();

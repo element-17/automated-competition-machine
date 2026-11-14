@@ -96,6 +96,27 @@ test("同核心名赛事已完成时，非 redo 不再排队；redo 显式放行
   }
 });
 
+test("审核没过就丢：queued 状态未领取的条目判无效后也移出队列", async () => {
+  const s = await setup();
+  try {
+    const first = s.add(TITLE, "https://a.edu.cn/notice");
+    // CLI scan --url 的入口直接入队为 queued，不走候选态
+    assert.ok(s.store.enqueue(first));
+    s.store.setQueueReview(first, {
+      decision: "invalid",
+      reason: "资格不符",
+      reviewer: "manual",
+    });
+    assert.equal(
+      s.store.queue().filter((r) => r.competitionId === first).length,
+      0,
+      "无效的排队项已移出队列",
+    );
+  } finally {
+    await s.done();
+  }
+});
+
 test("discovery 对同核心名不同链接只保留一条", async () => {
   const s = await setup();
   try {
