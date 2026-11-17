@@ -37,6 +37,11 @@ const Execution = z.object({
   requestTimeoutSeconds: z.number().int().min(30).max(1800).default(300),
   /** 一次模型调用最多尝试几次（含首次）；总时长上限 = 本次数 × requestTimeoutSeconds，重试共享该上限。 */
   requestAttempts: z.number().int().min(1).max(5).default(3),
+  /**
+   * 单次调用允许的最大输出 token。长篇作品（小说、报告）常超过 8k 被截断，
+   * 这里是下限保护：写作/研究类默认给足，模型或供应商上限更低时以其自身限制为准。
+   */
+  maxOutputTokens: z.number().int().min(1024).max(200_000).default(32_000),
 });
 export type ExecutionSettings = z.infer<typeof Execution>;
 export const executionSettings = (cfg: {

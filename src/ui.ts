@@ -547,6 +547,13 @@ async function executionMenu(
     validate: intIn(1, 5),
   });
   if (cancelled(attempts)) return cfg;
+  const maxOutput = await p.text({
+    message:
+      "单次调用最大输出 token（长篇作品被截断时调大；供应商上限更低时以其为准）",
+    initialValue: String(settings.maxOutputTokens),
+    validate: intIn(1024, 200_000),
+  });
+  if (cancelled(maxOutput)) return cfg;
   const budget = await p.text({
     message: "新任务默认模型预算单位",
     initialValue: String(cfg.maxCalls),
@@ -564,6 +571,7 @@ async function executionMenu(
       researchRounds: Number(researchRounds),
       requestTimeoutSeconds: Number(timeout),
       requestAttempts: Number(attempts),
+      maxOutputTokens: Number(maxOutput),
     },
     Number(budget),
   );

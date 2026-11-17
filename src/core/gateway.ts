@@ -437,7 +437,9 @@ export class OfficialGateway implements ModelGateway {
   ): Promise<string> {
     const key = this.key(a),
       signal = AbortSignal.timeout(timeoutMs),
-      p = a.provider;
+      p = a.provider,
+      // 输出上限：写作/研究类长文最容易撞到供应商默认 8k，按配置给足。
+      maxOutput = executionSettings(this.cfg).maxOutputTokens;
     if (p.protocol === "gemini") {
       const baseUrl = p.baseURL || process.env.COMPETE_GEMINI_BASE_URL;
       const response = await new GoogleGenAI({
@@ -446,7 +448,11 @@ export class OfficialGateway implements ModelGateway {
       }).models.generateContent({
         model: a.model,
         contents: prompt,
-        config: { systemInstruction: system, abortSignal: signal },
+        config: {
+          systemInstruction: system,
+          abortSignal: signal,
+          maxOutputTokens: maxOutput,
+        },
       });
       metrics.usage = providerUsage(p.protocol, response.usageMetadata);
       checkGeminiCompletion(response);
@@ -458,18 +464,22 @@ export class OfficialGateway implements ModelGateway {
       const deepseek = /(^|\.)deepseek\.com$/.test(
         p.baseURL ? new URL(p.baseURL).hostname : "",
       );
-      const response = await new Anthropic({
+      const client = new Anthropic({
         apiKey: key,
         maxRetries: 0,
         ...(p.baseURL ? { baseURL: p.baseURL } : {}),
-      }).messages.create(
-        {
-          model: a.model,
-          max_tokens: 8192,
-          system,
-          ...(deepseek ? { thinking: { type: "disabled" as const } } : {}),
-          messages: [{ role: "user", content: prompt }],
-        },
+      });
+      const body = {
+        model: a.model,
+        max_tokens: maxOutput,
+        system,
+        ...(deepseek ? { thinking: { type: "disabled" as const } } : {}),
+        messages: [{ role: "user" as const, content: prompt }],
+      };
+      // Anthropic 协议的非流式请求有 10 分钟上限保护（max_tokens>8192 会被 SDK 直接拒绝），
+      // 因此该协议按 SDK 允许的上限封顶；真正的长文额度由 OpenAI 兼容协议提供。
+      const response = await client.messages.create(
+        { ...body, max_tokens: Math.min(maxOutput, 8192) },
         { signal },
       );
       metrics.usage = providerUsage(p.protocol, response?.usage);
@@ -493,6 +503,7 @@ export class OfficialGateway implements ModelGateway {
       body: JSON.stringify({
         model: a.model,
         stream,
+        max_tokens: maxOutput,
         messages: [
           { role: "system", content: system },
           { role: "user", content: prompt },
