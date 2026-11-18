@@ -1650,6 +1650,16 @@ function fileAcceptanceChecks(
         .filter((c) => c.id === "naming")
         : [{ id: "naming", requirement: clause, status: "unverified", details: ["没有可精确核对的命名规则"] }];
     }
+    // 公告也常写中文格式说法（“Word文档”“PDF文件”），先归一成扩展名再走同一套核对。
+    const chineseFormat: Record<string, string> = {
+      "word文档": "docx", "word文件": "docx", "word版": "docx", "word 文档": "docx",
+      "excel表格": "xlsx", "excel文件": "xlsx", "pdf文件": "pdf", "pdf文档": "pdf",
+      "ppt演示文稿": "pptx", "压缩包": "zip", "纯文本": "txt",
+    };
+    const zhHit = Object.entries(chineseFormat).find(([k]) =>
+      new RegExp(`(?:交付|输出|产出|提交|文件|作品)(?:格式)?(?:为|是|采用|使用|：|:)?\s*${k.replace(" ", "\s*")}$`, "i").test(clause.trim()),
+    );
+    if (zhHit) return checkDelivery({ ...item!, formats: [zhHit[1]], quantity: null, limits: [], attachments: [], naming: null }, metrics, values);
     const format = /^(?:(?:交付|输出|产出|提交|文件|作品)(?:格式)?(?:为|是|采用|使用|：|:)?\s*)?(?:单个|一个|可编辑(?:的)?)*\s*(docx|pdf|md|txt|pptx|png|jpg|jpeg|zip|html|xlsx)(?:\s*(?:格式|文件|文档|表格|工作簿))?$/i.exec(clause);
     if (format) return checkDelivery({ ...item!, formats: [normFormat(format[1]!)], quantity: null, limits: [], attachments: [], naming: null }, metrics, values)
       .filter((c) => c.id === "format");

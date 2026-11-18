@@ -552,9 +552,25 @@ export function checkDelivery(
   values: NamingValues = {},
 ): RequirementCheck[] {
   const checks = checkLimits(item.limits, metrics);
+  // 公告常写中文说法（“Word文档”“PDF文件”“Excel表格”），先按中文词归一，再按别名归一到实际扩展名。
+  const chinese: Record<string, string> = {
+    word文档: "docx",
+    word文件: "docx",
+    word版: "docx",
+    "word 文档": "docx",
+    excel表格: "xlsx",
+    excel文件: "xlsx",
+    pdf文件: "pdf",
+    pdf文档: "pdf",
+    ppt演示文稿: "pptx",
+    压缩包: "zip",
+    纯文本: "txt",
+  };
   const aliases: Record<string, string> = {
     word: "docx",
+    excel: "xlsx",
     powerpoint: "pptx",
+    ppt: "pptx",
     jpeg: "jpg",
     markdown: "md",
   };
@@ -564,7 +580,8 @@ export function checkDelivery(
       .split(/\s*(?:\/|或|、|,)\s*/)
       .map((f) => {
         const norm = f.trim().replace(/^\./, "");
-        return aliases[norm] || norm;
+        const zh = chinese[norm.replace(/\s+/g, "")];
+        return aliases[zh || norm] || zh || norm;
       }),
   );
   checks.unshift({

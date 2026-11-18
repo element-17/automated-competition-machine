@@ -245,3 +245,14 @@ test("报名表规则按生成文件的栏目标签逐项核对，缺栏目判�
   assert.equal(fail.status, "failed");
   assert.match(fail.details[0], /缺少/);
 });
+
+test("中文格式说法（Word文档等）按实际扩展名核对", () => {
+  const item = (formats) => ({ type: "作品", formats, quantity: null, limits: [], naming: null, attachments: [], submission: null, official_template: null });
+  const metric = { path: "/tmp/作品.docx", bytes: 100, errors: [] };
+  const got = checkDelivery(item(["Word文档"]), [metric], {});
+  assert.equal(got.find((x) => x.id === "format").status, "passed");
+  const bad = checkDelivery(item(["Word文档"]), [{ ...metric, path: "/tmp/作品.pdf" }], {});
+  assert.equal(bad.find((x) => x.id === "format").status, "failed");
+  const excel = checkDelivery(item(["Excel表格"]), [{ ...metric, path: "/tmp/表.xlsx" }], {});
+  assert.equal(excel.find((x) => x.id === "format").status, "passed");
+});
