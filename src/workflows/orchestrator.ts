@@ -1642,7 +1642,8 @@ function fileAcceptanceChecks(
   const values = { ...ctx.cfg.profile, workTitle: attemptTitle(attempt) };
   const unreadable = metrics.flatMap((m) => m.errors);
   const one = (clause: string): RequirementCheck[] => {
-    const naming = /^(?:文件名|命名)(?:(?:必须|应|须)?(?:精确|严格)?(?:为|是|：|:))?\s*(.+)$/.exec(clause);
+    // 「文件名无空格/不含…」这类否定式约束不是命名规则（没有具体名字），由命名主规则一并核对。
+    const naming = /^(?:文件名|命名)(?:(?:必须|应|须)?(?:精确|严格)?(?:为|是|：|:))\s*(.+)$/.exec(clause);
     if (naming) {
       const rule = /^(?:符合|遵守|按)(?:官方|比赛|要求的)?(?:命名)?(?:规则|要求)$/.test(naming[1]!)
         ? item?.naming : unquote(naming[1]!);
