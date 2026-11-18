@@ -152,6 +152,26 @@ export function resolveFileName(
   extension?: string,
 ): string | null {
   if (!naming) return null;
+  // 规则里用反引号/书名号外引用完整字面文件名时直接取用（“文件名精确为 `xxx.docx`”）。
+  const literal = /[`「“"']((?:[^`」”"']|\.[A-Za-z0-9]{1,10}?)*)[`」”"']/i.exec(
+    naming,
+  );
+  if (literal && /\.[a-z0-9]{1,10}$/i.test(literal[1]!)) {
+    let literalText = literal[1]!;
+    let literalUnresolved = false;
+    for (const [re, key] of namingFields) {
+      literalText = literalText.replace(re, () => {
+        const v = values[key as keyof NamingValues]?.trim();
+        if (!v) {
+          literalUnresolved = true;
+          return "\u0000";
+        }
+        return v.replace(/[\\/:*?"<>|\r\n]/g, "_");
+      });
+    }
+    if (literalUnresolved) return null;
+    return fixedFileName(literalText);
+  }
   let text = naming
     .trim()
     .replace(/^(?:文件名|命名)(?:必须)?(?:为|：|:)\s*/, "")
