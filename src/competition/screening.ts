@@ -107,14 +107,20 @@ export async function screenOne(
       ? verdict.deadline
       : null;
   if (verdict.decision === "valid") {
-    const parts = deadline?.split("-").map(Number);
-    const nums = (verdict.quote || "").match(/\d+/g)?.map(Number) || [];
+    // 引用认可词表：报名/投稿/提交之外，“截稿时间/截稿日期/征稿截止”同样表明这是提交截止日。
+    // 日期一致性：允许引用用中文写法（2026年12月15日）与 deadline（2026-12-15）等值。
+    const quoteText = verdict.quote || "";
+    const nums = quoteText.match(/\d+/g)?.map(Number) || [];
+    const cnDate = deadline
+      ? `${deadline.slice(0, 4)}年${Number(deadline.slice(5, 7))}月${Number(deadline.slice(8, 10))}日`
+      : "";
+    const dateMatches = !!deadline &&
+      (deadline.split("-").every((n) => nums.includes(Number(n))) ||
+        (cnDate && quoteText.includes(cnDate)));
     if (
       !deadline ||
-      !parts?.every((n) => nums.includes(n)) ||
-      !/报名|投稿|作品.{0,5}(?:提交|征集)|提交.{0,5}作品/.test(
-        verdict.quote || "",
-      ) ||
+      !dateMatches ||
+      !/报名|投稿|截稿|作品.{0,5}(?:提交|征集)|提交.{0,5}作品|(?:提交|征集).{0,5}截止|征文.{0,6}止/.test(quoteText) ||
       /开始前|尚未开放|未开放报名/.test(verdict.reason)
     ) {
       verdict.decision = "needs_review";
