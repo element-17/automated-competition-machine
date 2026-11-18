@@ -686,7 +686,8 @@ export class Store {
       else if (
         !row.deadline ||
         row.deadline === today ||
-        !/报名|投稿|作品.{0,5}(?:提交|征集)|提交.{0,5}作品/.test(
+        // 与 screening 的认可词表一致：截稿时间/征稿截止同样表明这是提交截止日。
+        !/报名|投稿|截稿|作品.{0,5}(?:提交|征集)|提交.{0,5}作品|(?:提交|征集).{0,5}截止|征文.{0,6}止/.test(
           row.quote || "",
         ) ||
         /开始前|尚未开放|未开放报名/.test(row.reason)
