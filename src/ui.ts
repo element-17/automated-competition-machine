@@ -25,6 +25,7 @@ import {
   hasKey,
   modelLabel,
   modelProblems,
+  modelWarnings,
   protocolLabels,
   protocols,
   providers,
@@ -591,24 +592,70 @@ async function profileMenu(
     `学校：${current.school || "未设置"}
 学院：${current.college || "未设置"}
 专业：${current.major || "未设置"}
-身份：${current.identity || "未设置"}
-姓名：${current.name || "未设置"}
-学号：${current.studentId || "未设置"}
-电话：${current.phone || "未设置"}
-邮箱：${current.email || "未设置"}
-指导教师：${current.advisor || "未设置"}
-团队名称：${current.teamName || "未设置"}`,
+身份 / 年级 / 班级：${current.identity || "未设置"} / ${current.grade || "未设置"} / ${current.className || "未设置"}
+姓名 / 学号 / 身份证号：${current.name || "未设置"} / ${current.studentId || "未设置"} / ${current.idNumber ? "已设置" : "未设置"}
+电话 / 邮箱 / QQ：${current.phone || "未设置"} / ${current.email || "未设置"} / ${current.qq || "未设置"}
+指导教师：${current.advisor || "未设置"}${current.advisorTitle ? `（${current.advisorTitle}）` : ""}${current.advisorDepartment ? ` · ${current.advisorDepartment}` : ""}
+指导教师联系：${current.advisorPhone || "未设置"} / ${current.advisorEmail || "未设置"}
+团队名称：${current.teamName || "未设置"}
+队员人数：${(current.members || []).length} 人`,
     "当前设置",
   );
   const action = await p.select({
     message: "操作",
     options: [
-      { value: "edit", label: "编辑资料" },
+      { value: "edit", label: "编辑个人与导师资料" },
+      { value: "members", label: "编辑队员列表" },
       { value: "clear", label: "清空资料" },
       { value: "back", label: "返回" },
     ],
   });
   if (cancelled(action) || action === "back") return cfg;
+  if (action === "members") {
+    const existing = current.members || [];
+    const members = [...existing];
+    while (true) {
+      const mAction = await p.select({
+        message: `队员列表（当前 ${members.length} 人）`,
+        options: [
+          { value: "add", label: "新增队员" },
+          ...(members.length ? [{ value: "clear", label: "清空队员列表" }] : []),
+          { value: "save", label: "保存并返回" },
+        ],
+      });
+      if (cancelled(mAction) || mAction === "save") break;
+      if (mAction === "clear") {
+        members.length = 0;
+        continue;
+      }
+      const mName = await p.text({ message: "队员姓名" });
+      if (cancelled(mName) || !mName.trim()) continue;
+      const mStudentId = await p.text({ message: "队员学号（可选）" });
+      if (cancelled(mStudentId)) continue;
+      const mIdNumber = await p.text({ message: "队员身份证号（可选）" });
+      if (cancelled(mIdNumber)) continue;
+      const mPhone = await p.text({ message: "队员电话（可选）" });
+      if (cancelled(mPhone)) continue;
+      const mMajor = await p.text({ message: "队员专业（可选）" });
+      if (cancelled(mMajor)) continue;
+      members.push({
+        name: mName.trim(),
+        studentId: mStudentId.trim() || undefined,
+        idNumber: mIdNumber.trim() || undefined,
+        phone: mPhone.trim() || undefined,
+        major: mMajor.trim() || undefined,
+      });
+    }
+    const file = configPath(path);
+    const raw = existsSync(file) ? JSON.parse(readFileSync(file, "utf8")) : {};
+    writeFileSync(
+      file,
+      JSON.stringify({ ...raw, profile: { ...current, members } }, null, 2) + "\n",
+      "utf8",
+    );
+    p.log.success(`队员列表已保存（共 ${members.length} 人）`);
+    return loadConfig(path);
+  }
   if (action === "clear") {
     const file = configPath(path);
     const raw = existsSync(file) ? JSON.parse(readFileSync(file, "utf8")) : {};
@@ -680,16 +727,67 @@ async function profileMenu(
     defaultValue: current.teamName,
   });
   if (cancelled(teamName)) return cfg;
+  const grade = await p.text({
+    message: "年级（可选）",
+    placeholder: "如：2025级",
+    defaultValue: current.grade,
+  });
+  if (cancelled(grade)) return cfg;
+  const className = await p.text({
+    message: "班级（可选）",
+    placeholder: "如：智能科学1班",
+    defaultValue: current.className,
+  });
+  if (cancelled(className)) return cfg;
+  const idNumber = await p.text({
+    message: "身份证号（报名表必填时用，可选）",
+    defaultValue: current.idNumber,
+  });
+  if (cancelled(idNumber)) return cfg;
+  const qq = await p.text({
+    message: "QQ（可选）",
+    defaultValue: current.qq,
+  });
+  if (cancelled(qq)) return cfg;
+  const advisorPhone = await p.text({
+    message: "指导教师电话（可选）",
+    defaultValue: current.advisorPhone,
+  });
+  if (cancelled(advisorPhone)) return cfg;
+  const advisorEmail = await p.text({
+    message: "指导教师邮箱（可选）",
+    defaultValue: current.advisorEmail,
+  });
+  if (cancelled(advisorEmail)) return cfg;
+  const advisorDepartment = await p.text({
+    message: "指导教师院系（可选）",
+    defaultValue: current.advisorDepartment,
+  });
+  if (cancelled(advisorDepartment)) return cfg;
+  const advisorTitle = await p.text({
+    message: "指导教师职称（可选）",
+    defaultValue: current.advisorTitle,
+  });
+  if (cancelled(advisorTitle)) return cfg;
   const profile = {
+    ...current,
     school: school.trim() || undefined,
     college: college.trim() || undefined,
     major: major.trim() || undefined,
     identity: identity.trim() || undefined,
+    grade: grade.trim() || undefined,
+    className: className.trim() || undefined,
     name: name.trim() || undefined,
     studentId: studentId.trim() || undefined,
+    idNumber: idNumber.trim() || undefined,
     phone: phone.trim() || undefined,
     email: email.trim() || undefined,
+    qq: qq.trim() || undefined,
     advisor: advisor.trim() || undefined,
+    advisorPhone: advisorPhone.trim() || undefined,
+    advisorEmail: advisorEmail.trim() || undefined,
+    advisorDepartment: advisorDepartment.trim() || undefined,
+    advisorTitle: advisorTitle.trim() || undefined,
     teamName: teamName.trim() || undefined,
   };
   const file = configPath(path);
@@ -1310,6 +1408,8 @@ async function retry(store: Store) {
 function doctor(cfg: AppConfig) {
   const a = credentials(cfg);
   agentTable(cfg);
+  const warnings = modelWarnings(cfg);
+  for (const w of warnings) p.log.warn(w);
   const browser = browserAvailability();
   p.log.info(
     browser.available ? "浏览器验收：可用" : "浏览器验收：" + browser.reason,

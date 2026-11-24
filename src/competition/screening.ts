@@ -8,6 +8,7 @@ import { fetchDocument, saveSource } from "./sources.js";
 import { parseJSON } from "../core/gateway.js";
 import { modelLabel } from "../agents/models.js";
 import { guards } from "../agents/prompts.js";
+import { assessWinnability } from "./winnability.js";
 
 const Verdict = z.object({
   decision: z.enum(["valid", "invalid", "needs_review"]),
@@ -131,6 +132,19 @@ export async function screenOne(
     } else if (deadline === todayChina()) {
       verdict.decision = "needs_review";
       verdict.reason = `截止日期是今天，请核实具体时刻：${verdict.reason}`;
+    } else {
+      // 前置可行性与赛道可胜率评估：发现封闭外部平台作品ID/纯手写扫描/实物邮寄等硬阻塞时，提前转待人工确认。
+      const win = assessWinnability(
+        item.title,
+        evidence.map((e) => e.text).join("\n"),
+        cfg.profile,
+      );
+      if (win.tier === "blocked") {
+        verdict.decision = "needs_review";
+        verdict.reason = `前置可行性拦截（${win.hardBlockers.join("；")}），已转人工确认避免空耗制作额度；原判断：${verdict.reason}`;
+      } else {
+        verdict.reason = `[可胜率 ${win.score}/100·${win.tier}] ${verdict.reason}`;
+      }
     }
   }
   const review = {

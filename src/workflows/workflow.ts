@@ -142,13 +142,13 @@ export function researchGraph(
           (x) => x.query,
         ),
       );
-      // 搜索闲鱼等付费平台的往届获奖作品
-      const marketplaceQueries = [
-        `${c.title} 往届 获奖作品 闲鱼`,
-        `${c.title} 参赛作品集 淘宝`,
-        `${c.title} 竞赛资料包 闲鱼`,
+      // 追查公开的往届一等奖/优秀作品展示、高校报道、开源代码与评分细则，不再空耗在电商平台。
+      const showcaseQueries = [
+        `${c.title} 往届 一等奖 作品 展示`,
+        `${c.title} 获奖作品 源码 OR 论文 OR 答辩`,
+        `${c.title} 评分标准 评审细则`,
       ];
-      for (const q of marketplaceQueries)
+      for (const q of showcaseQueries)
         if (!used.has(q)) {
           used.add(q);
           await searchLogged(store, gateway, s.competitionId, q);
@@ -177,7 +177,7 @@ export function researchGraph(
         try {
           raw = await gateway.generate(
             "writer",
-            `${Guard}\n根据以下证据提出最多三个具体的后续搜索词，用于寻找往届作品、获奖团队、作品展示或原始规则附件。当前第 ${round} 轮，已经搜索 ${JSON.stringify([...used])}，不要重复。沿获奖名单→作品名称/作者→学校报道→公开代码/演示追查，有确切名称或团队线索时必须追查其作品；找不到线索时搜索往届获奖名单。如果免费渠道找不到完整作品，可以搜索"闲鱼 [比赛名称] 获奖作品"或"淘宝 [比赛名称] 作品集"等关键词，识别付费资料来源。只输出 JSON 字符串数组，不要虚构名称；若已无必要的查询输出空数组。赛事：${c.title}\n证据：${JSON.stringify(evidence)}`,
+            `${Guard}\n根据以下证据提出最多三个具体的后续搜索词，用于寻找往届作品、获奖团队、评分细则、开源实现或原始规则附件。当前第 ${round} 轮，已经搜索 ${JSON.stringify([...used])}，不要重复。沿获奖名单→作品名称/作者→高校官网报道/公开代码仓库/作品展示页追查，有确切名称或团队线索时必须追查其作品；找不到线索时搜索往届获奖名单与评分标准。只输出 JSON 字符串数组，不要虚构名称；若已无必要的查询输出空数组。赛事：${c.title}\n证据：${JSON.stringify(evidence)}`,
             "research",
           );
         } catch (e) {
@@ -318,7 +318,7 @@ export function researchGraph(
           kind: e.kind,
           text: e.text.slice(0, 18000),
         }));
-      const prompt = `${Guard}\n读取来源并只输出一个 JSON 对象，字段必须为 title, edition, eligibility, deadline, ai_rules, scoring, deliverables, requires_idea, missing, citations, research。未知值用 null，不要猜测；冲突与未知记在 missing。deliverables 是数组，每项包含 type, quantity, formats(数组), limits(数组), naming, attachments(数组), submission, official_template；没有明确规定的项用 null 或空数组；不要制定模板。deliverables 只收录需要产出提交文件的参赛作品（论文、方案、设计、译文等）；线上报名、问卷填报、注册缴费这类流程性事项不是交付物，不要列入，也不要把“报名信息表”当成交付物。citations 为数组，每项包含 field、url、quote，其中 quote 必须逐字摘自该 url 的来源正文；每项已知规则尽量提供引用。research 必须为 {past_winners:[],past_works:[],judging:[],missing:[]}，前三项为 {url,quote,title} 数组；仅当找到真实获奖名单时填 past_winners，仅找到实际公开作品、代码或展示时填 past_works，仅有奖项或标题不足以证明完整作品；评分依据填 judging。quote 必须逐字来自该 URL 正文；未找到就留空，不要猜测。requires_idea 对翻译等给定材料的任务为 false，不确定为 null。赛事：${c.title}\n用户情况：${JSON.stringify(cfg.profile)}\n来源：${JSON.stringify(sources)}`;
+      const prompt = `${Guard}\n读取来源并只输出一个 JSON 对象，字段必须为 title, edition, eligibility, deadline, ai_rules, scoring, deliverables, requires_idea, missing, citations, research。未知值用 null，不要猜测；冲突与未知记在 missing。deliverables 是数组，每项包含 type, quantity, formats(数组), limits(数组), naming, attachments(数组), submission, official_template；没有明确规定的项用 null 或空数组；不要制定模板。deliverables 只收录需要产出提交文件的参赛作品（论文、方案、设计、译文等）；线上报名、问卷填报、注册缴费这类流程性事项不是交付物，不要列入，也不要把“报名信息表”当成交付物。citations 为数组，每项包含 field、url、quote，其中 quote 必须逐字摘自该 url 的来源正文；每项已知规则尽量提供引用。research 必须为 {past_winners:[],past_works:[],judging:[],missing:[],benchmark:{winning_patterns:[],judge_preferences:[],overused_topics:[],differentiator_angles:[]}}，前三项为 {url,quote,title} 数组；仅当找到真实获奖名单时填 past_winners，仅找到实际公开作品、代码或展示时填 past_works，仅有奖项或标题不足以证明完整作品；评分依据填 judging。benchmark 仅基于实际抓取的评分细则和往届线索提炼抽象的评委偏好、高分结构特征、常见扎堆/饱和题材与差异化切入角度（不抄袭具体项目正文，没有依据的数组留空）。quote 必须逐字来自该 URL 正文；未找到就留空，不要猜测。requires_idea 对翻译等给定材料的任务为 false，不确定为 null。赛事：${c.title}\n用户情况：${JSON.stringify(cfg.profile)}\n来源：${JSON.stringify(sources)}`;
       let candidate = parseJSON(
         await gateway.generate("writer", prompt, "research"),
       );

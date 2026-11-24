@@ -2,6 +2,7 @@ node_modules/
 runtimes/
 dist/
 data/
+bench-results/
 .env
 .env.*
 config/config.json

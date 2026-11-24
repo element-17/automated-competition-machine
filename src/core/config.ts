@@ -23,12 +23,28 @@ const Search = z.object({
   queriesPerRun: z.number().int().min(1).max(30).default(8),
   queries: z.array(z.string().trim().min(1)).default([]),
   screen: z.boolean().default(true),
+  /** 是否在研究提示词中拼接社交平台（小红书/B站/知乎等）site: 查询；默认关闭避免登录后抓空。 */
+  socialPlatforms: z.boolean().default(false),
 });
 export type SearchSettings = z.infer<typeof Search>;
 export const searchDefaults: SearchSettings = Search.parse({});
 export const searchSettings = (cfg: {
   search?: Partial<SearchSettings>;
 }): SearchSettings => ({ ...searchDefaults, ...cfg.search });
+
+/** 作品冲奖质量控制参数：评委打分卡、定向精修、定量数值仿真与可选人机确认点。 */
+const Quality = z.object({
+  rubricScoring: z.boolean().default(true),
+  minScore: z.number().int().min(50).max(98).default(82),
+  polishRounds: z.number().int().min(0).max(3).default(1),
+  simulation: z.boolean().default(true),
+  interactiveGates: z.boolean().default(false),
+});
+export type QualitySettings = z.infer<typeof Quality>;
+export const qualityDefaults: QualitySettings = Quality.parse({});
+export const qualitySettings = (cfg: {
+  quality?: Partial<QualitySettings>;
+}): QualitySettings => Quality.parse(cfg.quality || {});
 
 const Execution = z.object({
   productionRounds: z.number().int().min(1).max(8).default(4),
@@ -72,6 +88,7 @@ const Config = z
       .optional(),
     search: Search.prefault({}),
     execution: Execution.prefault({}),
+    quality: Quality.prefault({}),
     maxCalls: z.number().int().min(1).default(80),
     sources: z.array(z.string().url()).default([]),
     profile: z
@@ -80,12 +97,31 @@ const Config = z
         college: z.string().optional(),
         major: z.string().optional(),
         identity: z.string().optional(),
+        grade: z.string().optional(),
+        className: z.string().optional(),
         studentId: z.string().optional(),
+        idNumber: z.string().optional(),
         name: z.string().optional(),
         phone: z.string().optional(),
         email: z.string().optional(),
+        qq: z.string().optional(),
         advisor: z.string().optional(),
+        advisorPhone: z.string().optional(),
+        advisorEmail: z.string().optional(),
+        advisorDepartment: z.string().optional(),
+        advisorTitle: z.string().optional(),
         teamName: z.string().optional(),
+        members: z
+          .array(
+            z.object({
+              name: z.string().optional(),
+              studentId: z.string().optional(),
+              idNumber: z.string().optional(),
+              phone: z.string().optional(),
+              major: z.string().optional(),
+            }),
+          )
+          .optional(),
       })
       .default({}),
     /** 覆盖各 Agent 的系统提示词；未填写的使用内置默认值。 */

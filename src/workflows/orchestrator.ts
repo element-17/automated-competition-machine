@@ -21,15 +21,38 @@ import { basename, join, dirname, extname } from "node:path";
 import JSZip from "jszip";
 import { z } from "zod";
 import type { AppConfig } from "../core/config.js";
-import { executionSettings } from "../core/config.js";
+import { executionSettings, qualitySettings } from "../core/config.js";
 import { saveJobProgress, type JobProgress } from "../core/job-progress.js";
 import type { Store } from "../core/store.js";
 import type { Brief, ModelGateway } from "../core/types.js";
 import { parseJSON } from "../core/gateway.js";
 import { modelLabel } from "../agents/models.js";
 import type { AgentName } from "../agents/prompts.js";
-import { Work, renderWork, validateWork } from "../artifacts/artifacts.js";
+import {
+  Work,
+  isSemanticSlide,
+  parseTypographyRules,
+  renderWork,
+  validateWork,
+} from "../artifacts/artifacts.js";
 import { buildSoftware } from "../artifacts/software.js";
+import {
+  generateAndRunSimulation,
+  needsSimulation,
+} from "../artifacts/simulation.js";
+import {
+  Scorecard,
+  buildPolishFeedback,
+  detectAiCliches,
+  judgeRubricPrompt,
+} from "./judge-rubric.js";
+import {
+  attachSimulationToSpec,
+  createProjectSpec,
+  extractPrimaryDigest,
+  projectSpecPrompt,
+  type ProjectSpec,
+} from "./project-spec.js";
 import {
   BrowserReport,
   BrowserSuite,
@@ -106,10 +129,13 @@ import {
   checkDelivery,
   checkLimits,
   fixedFileName,
+  formatArtifactMetadata,
   measureArtifact,
   parseBounds,
   missingNamingParts,
+  requiredDocumentImages,
   resolveFileName,
+  type ArtifactMetrics,
   type RequirementCheck,
 } from "../artifacts/delivery-checks.js";
 const Original = z.object({
@@ -319,7 +345,7 @@ export function planProblems(
         out.push(`任务 ${t.id} 的标准 ${a.criterion} 未分类：${t.acceptance[a.criterion]}；必须在 acceptanceChecks 明确对应检查`);
       if (a.checks.includes("interaction") && t.kind !== "software")
         out.push(`任务 ${t.id} 不是软件，不能执行浏览器交互标准 ${a.criterion}`);
-      if (a.checks.includes("visual") && !["software", "image", "slides"].includes(t.kind) && t.format !== "docx")
+      if (a.checks.includes("visual") && !["software", "image", "slides"].includes(t.kind) && !["docx", "pdf"].includes(t.format))
         out.push(`任务 ${t.id} 的 ${t.format} 暂无真实页面视觉验收，不能承诺标准 ${a.criterion}`);
     }
     if (t.deliverable >= count)
@@ -567,6 +593,7 @@ type Ctx = {
   inputContext: unknown;
   selection?: unknown;
   images: Record<string, { path: string; title: string; caption: string }>;
+  projectSpec?: ProjectSpec;
 };
 /** 一次制作的结果；reviewText 为评审可读的产物内容，null 表示无法评审（如压缩包）。 */
 type Attempt = {
@@ -970,20 +997,26 @@ async function writeWork(
   const item = ctx.brief.deliverables[task.deliverable];
   const needs =
     '"needs_input":["只有用户才能提供的资料，写清要什么、用在作品哪里"]';
-  // 同一作品中已生成的图片可直接放进 PPT；写作模型只引用 id，路径由程序填入。
+  // 同一作品中已生成的图片与数值仿真图表可直接嵌入 PPT 或 DOCX/PDF；写作模型只引用 id，路径由程序填入。
   const imageList = Object.entries(ctx.images).map(([ref, x]) => ({
     ref,
     title: x.title,
     caption: x.caption,
   }));
-  const imageSpec = imageList.length
-    ? `可用的已生成图片（用 {"type":"image","ref":"图片 ref","x":0,"y":0,"w":6,"h":4} 放进页面，程序按原比例缩放到框内）：${JSON.stringify(imageList)}。展示外观、结构、场景、流程的页面应放入对应图片，不要只写图片文件名或“此处放图”；图片和文字不要重叠。`
-    : "目前没有可用的已生成图片，不要使用 image 元素。";
+  const imageSpec = slides
+    ? imageList.length
+      ? `可用的已生成图片与图表（语义版式用 "imageRef":"图片 ref"，自由布局用 {"type":"image","ref":"图片 ref","x":0,"y":0,"w":6,"h":4}）：${JSON.stringify(imageList)}。展示外观、结构、场景、仿真数据的页面应放入对应图片，不要只写文件名。`
+      : "目前没有可用的已生成图片，不要使用 imageRef 或 image 元素。"
+    : imageList.length
+      ? `正文可直接用标准 Markdown 图片语法 \`![图题](ref)\` 嵌入已生成的高清图片或仿真图表，可用 ref：${JSON.stringify(imageList)}。严禁编造不存在的图片文件名或链接！`
+      : "正文不得编造不存在的图片文件名或 Markdown 图片链接；需要展示系统架构、工作流程或定量对比图时，请使用 \`\`\`mermaid 代码块（flowchart TD/LR、sequenceDiagram、stateDiagram-v2）或 \`\`\`chart JSON 代码块（支持 bar/horizontal-bar/line/pie/donut/radar），导出系统会自动将其渲染为高清图片并嵌入 DOCX/PDF。";
   const spec = slides
-    ? `输出 JSON {"kind":"slides","title":"","sources":[],${needs},"slides":[{"background":"FFFFFF","elements":[{"type":"text|rect|ellipse|line|image","text":"文字元素内容，其他元素可为空","x":0,"y":0,"w":5,"h":1,"fontSize":24,"color":"202832","fill":"可选六位色值","bold":false}]}]}；每个 type 只选一个值。页面宽13.333英寸高7.5英寸，元素自行布局，文本框不要重叠或溢出。${imageSpec}`
+    ? `优先使用语义化专业版式输出 JSON {"kind":"slides","title":"","theme":"${ctx.projectSpec?.theme || "academic-blue"}","sources":[],${needs},"slides":[{"layout":"cover|toc|hero-stats|two-column|image-text|architecture|table|chart|timeline|ending","title":"页标题","subtitle":"可选副标题","kicker":"可选英文/短标签","bullets":["精简要点"],"metrics":[{"value":"核心数","label":"指标名","detail":"说明"}],"left":{"heading":"左栏标题","points":["要点"]},"right":{"heading":"右栏标题","points":["要点"]},"imageRef":"可选图片ref","imageCaption":"可选图题","imageSide":"left|right","mermaid":"可选mermaid流程/架构代码","chart":{"type":"bar|line|pie|donut|radar","title":"图名","labels":["A","B"],"series":[{"name":"系列","values":[1,2]}]},"table":{"headers":["列1","列2"],"rows":[["值1","值2"]]},"steps":[{"phase":"阶段1","title":"名称","detail":"说明"}],"meta":["作者/学校"]}]}` +
+      `。每页按 layout 选填对应字段，单页文字精炼不超过 220 字，善用 hero-stats/two-column/architecture/table/chart/timeline 丰富视觉节奏。${imageSpec}`
     : spreadsheet
       ? `输出 JSON {"kind":"spreadsheet","title":"工作簿标题","sources":[],${needs},"sheets":[{"name":"工作表名","rows":[["第1行表头1","表头2"],["第2行起是数据行，单元格数与表头一致"]]}]}。第一行必须是表头行：与官方要求的栏目一致、顺序一致、不重复；数据行每行单元格数与表头一致；所有单元格都是字符串，不写公式（以 = 开头会被拒绝）。没有依据的序号、日期、编号列不添加；用户资料已提供的字段直接填入；缺真实资料的数据留空字符串并写进 needs_input，不得编造。`
-      : `输出 JSON {"kind":"text","title":"","text":"完整作品正文","sources":[],${needs}}。title 只写作品本身的标题，不要拼入姓名、学校、赛事名称、下划线或文件命名格式（文件名由系统按命名规则处理）；署名等信息按赛事要求写在正文里。正文可以用 Markdown 标题（#、##、###）、列表和 **加粗**，导出时会转换成文档样式。`;
+      : `输出 JSON {"kind":"text","title":"","text":"完整作品正文","sources":[],${needs}}。title 只写作品本身的标题，不要拼入姓名、学校、赛事名称、下划线或文件命名格式（文件名由系统按命名规则处理）；署名等信息按赛事要求写在正文里。正文支持 Markdown 标题（#、##、###）、有序/无序列表、标准 Markdown 表格（|列1|列2|）、公式（$...$）、**加粗**、\`\`\`mermaid 架构/流程图与 \`\`\`chart 声明式数据图，导出时会自动排版为真实 Word/PDF 表格、上下标公式与高清插图。${imageSpec}`;
+  const specBlock = projectSpecPrompt(ctx.projectSpec, task.kind);
   let previous: unknown = null;
   if (round > 0) {
     for (const suffix of ["-repair", ""]) {
@@ -1000,7 +1033,7 @@ async function writeWork(
       }
     }
   }
-  const prompt = `${Guard}\n请针对这项比赛的指定交付物直接创作。${strategyPrompt(ctx.selection, task.kind)}所有参赛文字由你撰写，不使用固定模板。只能依据给定来源和真实原文，不虚构数据、采访、实验和来源。${profileNote(ctx.cfg.profile)}不要防御性写作：设计方案、结构、参数和验证计划都作为作品内容肯定地写，不逐句加“设计假设”“待核实”“仅供参考”等免责声明。作品必须是可以直接提交的完整成稿，正文不得出现【待补充】【待填写】之类的占位。缺少真实外部资料（统计数据、价格、调研、照片、测试记录）时不要留空等人来填：把相关内容写成设计目标、验证方案或待实施步骤，或改用给定来源里已有的事实，支撑不了的主张就不写。只有官方规则明确要求提交、且只能由用户本人提供的材料（签字盖章、证明文件、实物照片、用户资料里没有的必填个人信息）才写进 needs_input，系统会汇总成单独文件交给用户；needs_input 里的事项不要在正文里留占位。证据中 kind 为 user 的条目是用户亲自提供的真实资料，可以直接作为事实使用，用来替换相应的【待补充】，不要再向用户索要。${task.kind === "translation" ? "本任务是翻译：忠实、完整地翻译比赛提供的原文，不增删内容。" : ""}${spec}\n这是第 ${round + 1} 轮，请保留上一版已正确的内容并解决反馈，返回完整作品。上一版作品：${JSON.stringify(previous)}
+  const prompt = `${Guard}\n请针对这项比赛的指定交付物直接创作。${strategyPrompt(ctx.selection, task.kind)}${specBlock}所有参赛文字由你撰写，不使用固定模板。只能依据给定来源和真实原文，不虚构数据、采访、实验和来源。${profileNote(ctx.cfg.profile)}不要防御性写作：设计方案、结构、参数和验证计划都作为作品内容肯定地写，不逐句加“设计假设”“待核实”“仅供参考”等免责声明。作品必须是可以直接提交的完整成稿，正文不得出现【待补充】【待填写】之类的占位。缺少真实外部资料（统计数据、价格、调研、照片、测试记录）时不要留空等人来填：把相关内容写成设计目标、验证方案或待实施步骤，或改用给定来源里已有的事实，支撑不了的主张就不写。只有官方规则明确要求提交、且只能由用户本人提供的材料（签字盖章、证明文件、实物照片、用户资料里没有的必填个人信息）才写进 needs_input，系统会汇总成单独文件交给用户；needs_input 里的事项不要在正文里留占位。证据中 kind 为 user 的条目是用户亲自提供的真实资料，可以直接作为事实使用，用来替换相应的【待补充】，不要再向用户索要。${task.kind === "translation" ? "本任务是翻译：忠实、完整地翻译比赛提供的原文，不增删内容。" : ""}${spec}\n这是第 ${round + 1} 轮，请保留上一版已正确的内容并解决反馈，返回完整作品。上一版作品：${JSON.stringify(previous)}
 ${feedback.length ? `上一版未通过评审，必须逐条解决：\n${feedback.map((x, i) => `${i + 1}. ${x}`).join("\n")}\n` : ""}任务：${task.title}\n制作要求：${task.instructions}\n验收标准：${JSON.stringify(task.acceptance)}\n规则 ${JSON.stringify(ctx.brief)}\n本项交付物 ${JSON.stringify(item || null)}\n选题 ${JSON.stringify(ctx.idea)}\n证据 ${JSON.stringify(ctx.evidence)}\n比赛提供的原文 ${JSON.stringify(ctx.sourceText)}`;
   // 分章写作只适用于长正文；表格没有“字数”概念，不走大纲分章。
   const target =
@@ -1045,16 +1078,48 @@ ${feedback.length ? `上一版未通过评审，必须逐条解决：\n${feedbac
   );
   if (work.kind !== want)
     throw Error(`写作模型返回类型 ${work.kind} 与要求 ${want} 不符`);
-  // 用户资料里已填写的姓名/学校等直接替换进正文；剩下的真实空缺才汇总给用户。
-  if (work.text) work.text = applyProfile(work.text, ctx.cfg.profile);
-  for (const sheet of work.sheets || [])
-    for (const row of sheet.rows)
-      for (let i = 0; i < row.length; i++)
-        row[i] = applyProfile(row[i]!, ctx.cfg.profile);
-  work.needs_input = work.needs_input.filter(
-    (x) => !coveredByProfile(x, ctx.cfg.profile),
-  );
-  const layout = validateWork(work, slides ? imagePaths(ctx) : undefined);
+  const detectedTypo =
+    task.kind === "document" || task.kind === "translation"
+      ? parseTypographyRules([
+          task.title,
+          task.instructions,
+          ...(task.acceptance || []),
+          ...(item?.limits || []),
+          item?.type || "",
+        ])
+      : undefined;
+  const applyWorkProfile = (w: Work) => {
+    w.title = applyProfile(w.title, ctx.cfg.profile);
+    if (w.text) w.text = applyProfile(w.text, ctx.cfg.profile);
+    if (detectedTypo && Object.keys(detectedTypo).length)
+      w.typography = { ...detectedTypo, ...(w.typography || {}) };
+    if (w.kind === "slides" && !w.theme && ctx.projectSpec?.theme)
+      w.theme = ctx.projectSpec.theme;
+    for (const sheet of w.sheets || [])
+      for (const row of sheet.rows)
+        for (let i = 0; i < row.length; i++)
+          row[i] = applyProfile(row[i]!, ctx.cfg.profile);
+    for (const slide of w.slides || []) {
+      if (isSemanticSlide(slide)) {
+        slide.title = applyProfile(slide.title, ctx.cfg.profile);
+        if (slide.subtitle) slide.subtitle = applyProfile(slide.subtitle, ctx.cfg.profile);
+        if (slide.bullets) slide.bullets = slide.bullets.map((b) => applyProfile(b, ctx.cfg.profile));
+        if (slide.meta) slide.meta = slide.meta.map((m) => applyProfile(m, ctx.cfg.profile));
+        if (slide.footnote) slide.footnote = applyProfile(slide.footnote, ctx.cfg.profile);
+        if (slide.left) slide.left.points = slide.left.points.map((p) => applyProfile(p, ctx.cfg.profile));
+        if (slide.right) slide.right.points = slide.right.points.map((p) => applyProfile(p, ctx.cfg.profile));
+        if (slide.table)
+          slide.table.rows = slide.table.rows.map((r) => r.map((c) => applyProfile(c, ctx.cfg.profile)));
+      } else {
+        for (const element of slide.elements)
+          if (element.text) element.text = applyProfile(element.text, ctx.cfg.profile);
+      }
+    }
+    w.needs_input = w.needs_input.filter((x) => !coveredByProfile(x, ctx.cfg.profile));
+  };
+  applyWorkProfile(work);
+  const availImages = slides || task.kind === "document" ? imagePaths(ctx) : undefined;
+  const layout = validateWork(work, availImages);
   if (layout.length)
     work = await cached(
       ctx.cfg,
@@ -1072,17 +1137,8 @@ ${feedback.length ? `上一版未通过评审，必须逐条解决：\n${feedbac
         ),
     );
   if (work.kind !== want) throw Error(`修复后的作品类型 ${work.kind} 与要求 ${want} 不符`);
-  work.title = applyProfile(work.title, ctx.cfg.profile);
-  if (work.text) work.text = applyProfile(work.text, ctx.cfg.profile);
-  for (const sheet of work.sheets || [])
-    for (const row of sheet.rows)
-      for (let i = 0; i < row.length; i++)
-        row[i] = applyProfile(row[i]!, ctx.cfg.profile);
-  for (const slide of work.slides || [])
-    for (const element of slide.elements)
-      if (element.text) element.text = applyProfile(element.text, ctx.cfg.profile);
-  work.needs_input = work.needs_input.filter((x) => !coveredByProfile(x, ctx.cfg.profile));
-  const remaining = validateWork(work, slides ? imagePaths(ctx) : undefined);
+  applyWorkProfile(work);
+  const remaining = validateWork(work, availImages);
   if (remaining.length) throw Error(`修复后的作品仍未通过结构检查：${remaining.join("；")}`);
   const folder = taskFolder(ctx, task, round);
   const out = await renderWork(
@@ -1109,13 +1165,32 @@ ${feedback.length ? `上一版未通过评审，必须逐条解决：\n${feedbac
   }
   const reviewText = slides
     ? JSON.stringify(
-        work.slides!.map((s, i) => ({
-          page: i + 1,
-          text: s.elements.filter((e) => e.type === "text").map((e) => e.text),
-          images: s.elements
-            .filter((e) => e.type === "image")
-            .map((e) => ctx.images[e.ref!]?.title || e.ref),
-        })),
+        work.slides!.map((s, i) =>
+          isSemanticSlide(s)
+            ? {
+                page: i + 1,
+                layout: s.layout,
+                title: s.title,
+                subtitle: s.subtitle,
+                bullets: s.bullets,
+                metrics: s.metrics,
+                left: s.left,
+                right: s.right,
+                table: s.table,
+                chart: s.chart?.title,
+                mermaid: s.mermaid ? "含流程图/架构图" : undefined,
+                image: s.imageRef ? ctx.images[s.imageRef]?.title || s.imageRef : undefined,
+                steps: s.steps,
+                meta: s.meta,
+              }
+            : {
+                page: i + 1,
+                text: s.elements.filter((e) => e.type === "text").map((e) => e.text),
+                images: s.elements
+                  .filter((e) => e.type === "image")
+                  .map((e) => ctx.images[e.ref!]?.title || e.ref),
+              },
+        ),
       )
     : spreadsheet
       ? `# ${work.title}\n\n${work.sheets!
@@ -1208,7 +1283,13 @@ async function buildApp(
     {
       brief: { ...ctx.brief, profile: profileEntries(ctx.cfg.profile) },
       idea: ctx.idea,
-      task: { ...task, instructions: task.instructions + strategyPrompt(ctx.selection, task.kind) },
+      task: {
+        ...task,
+        instructions:
+          task.instructions +
+          strategyPrompt(ctx.selection, task.kind) +
+          projectSpecPrompt(ctx.projectSpec, task.kind),
+      },
       feedback,
     },
     task.format as "zip" | "html",
@@ -1254,6 +1335,7 @@ const Verdict = z
     needs_input: z.array(z.string()).default([]),
     criteria: z.array(CriterionResult).max(12).optional(),
     visualCriteria: z.array(CriterionResult).max(12).optional(),
+    scorecard: Scorecard.optional(),
   })
   .transform((v) => ({ ...v, pass: v.pass !== false && v.issues.length === 0 }));
 /** 仅接受完整、唯一、带证据的逐项结论；空对象和缺项不能成为成功记录。 */
@@ -1361,16 +1443,22 @@ async function browserVerify(
 /** 正常内容评审；仅无效 JSON/criteria 允许一次结构修复。 */
 async function verify(
   ctx: Ctx, task: PlanTask, attempt: Attempt, currentBrowser?: BrowserReport,
-  reuse?: TextReuseReport,
+  reuse?: TextReuseReport, metrics?: ArtifactMetrics[],
 ): Promise<Verdict> {
   const reviewText = attempt.reviewText || "";
   const contentCriteria = criteriaFor(task, "content");
   const visualCriteria = criteriaFor(task, "visual");
-  const rubric = `评价实际作品的具体性、论证或叙事、完整性、机制一致性，以及是否空泛或明显照搬。issues 只列影响完成或使用的具体实质缺陷：只有提纲或口号、核心内容缺失、论证硬伤或前后矛盾、核心机制未实现、明显不当照搬、编造事实或违反硬性规则。suggestions 只放可选改进，不触发返工。正常通过无需证明原创；没有来源、未覆盖外部作品或原创性未知本身不是缺陷。事实主张仍须有真实资料支持；正文留有占位符、待填空表或核心结论依赖不存在的数据，须列入 issues 并给出不依赖该资料的改法，相关 criteria 未通过。needs_input 只写官方规则要求、必须由用户本人提供的材料和用途，它会单独交给用户，不代表作品不合格，也不要把作品缺陷只写在 needs_input 里。suggestions 写最能提升评分的具体改进（位置＋改法），返工时会一并交给作者。设计参数可以直接陈述，验证计划不得写成已完成实验。只输出 JSON {"issues":["具体位置、实质问题和改法"],"suggestions":[],"needs_input":[]}，issues 必须显式返回。任务：${task.title}（${task.kind}/${task.format}）
+  const isOfficialForm = !!ctx.brief.deliverables[task.deliverable]?.official_template;
+  const wantRubric =
+    qualitySettings(ctx.cfg).rubricScoring && !isOfficialForm && task.kind !== "translation";
+  const fileMeta = metrics?.length
+    ? `\n实际导出文件实测元数据（由程序直接解析已导出文件得出，字体/字号/行距/页数/表格/嵌入图片数以此为准，切勿因只见正文文本而误判无排版属性）：${formatArtifactMetadata(metrics)}`
+    : "";
+  const rubric = `评价实际作品的具体性、论证或叙事、完整性、机制一致性，以及是否空泛或明显照搬。issues 只列影响完成或使用的具体实质缺陷：只有提纲或口号、核心内容缺失、论证硬伤或前后矛盾、核心机制未实现、明显不当照搬、编造事实或违反硬性规则。suggestions 只放可选改进，不触发返工。正常通过无需证明原创；没有来源、未覆盖外部作品或原创性未知本身不是缺陷。事实主张仍须有真实资料支持；正文留有占位符、待填空表或核心结论依赖不存在的数据，须列入 issues 并给出不依赖该资料的改法，相关 criteria 未通过。needs_input 只写官方规则要求、必须由用户本人提供的材料和用途，它会单独交给用户，不代表作品不合格，也不要把作品缺陷只写在 needs_input 里。suggestions 写最能提升评分的具体改进（位置＋改法），返工时会一并交给作者。设计参数可以直接陈述，验证计划不得写成已完成实验。只输出 JSON {"issues":["具体位置、实质问题和改法"],"suggestions":[],"needs_input":[]}，issues 必须显式返回。${wantRubric ? judgeRubricPrompt(ctx.brief, task.title) : ""}${fileMeta}\n任务：${task.title}（${task.kind}/${task.format}）
 制作要求：${task.instructions}
 验收标准：${JSON.stringify(task.acceptance)}
 比赛档案：${JSON.stringify(ctx.brief)}
-${ctx.brief.deliverables[task.deliverable]?.official_template ? "" : strategyPrompt(ctx.selection, task.kind)}
+${isOfficialForm ? "" : strategyPrompt(ctx.selection, task.kind)}
 已提供事实资料：${JSON.stringify(ctx.evidence.map((e) => ({ url: e.url, kind: e.kind, text: e.text.slice(0, 3000) })))}
 本地文字复用风险摘要（仅作线索，不自动判定违规；结合实际内容区分合理引用、固定用语和不当照搬）：${JSON.stringify(reuse ? { status: reuse.status, reason: reuse.reason, matches: reuse.matches.slice(0, 6).map((m) => ({ referenceId: m.referenceId, title: m.title, quote: m.quote.slice(0, 400) })) } : null)}`;
   const evaluate = (raw: string, expected: { criterion: number; requirement: string }[]) => {
@@ -1571,8 +1659,8 @@ function acceptanceChecks(
           : review.issues
         : [`${task.title} 的评审模型没有看图能力，无法验收实际画面`],
     });
-  // 幻灯片的逐页版面审查在评审阶段完成，结果已并入 content 检查；这里只确认确实检查过。
-  if (task.kind === "slides" || task.format === "docx")
+  // 幻灯片与 DOCX/PDF 文档的逐页版面审查在评审阶段完成，结果已并入验收；这里只确认确实检查过。
+  if (task.kind === "slides" || task.format === "docx" || task.format === "pdf")
     checks.push({
       id: "visual",
       status: review?.visual && review.pass ? "passed" : "failed",
@@ -1580,7 +1668,7 @@ function acceptanceChecks(
         ? []
         : (review?.issues.length
           ? review.issues
-          : [`${task.title} 的幻灯片未通过逐页版面审查`]),
+          : [`${task.title} 未通过逐页版面审查`]),
     });
   if (task.kind === "software")
     checks.push(
@@ -1783,6 +1871,14 @@ export async function runTask(ctx: Ctx, task: PlanTask): Promise<TaskResult> {
   };
   let currentBrowser: BrowserReport | undefined;
   let feedback: string[] = [];
+  let polishUsed = 0;
+  let bestPassing: {
+    attempt: Attempt;
+    review: Verdict;
+    requirements: RequirementCheck[];
+    rounds: number;
+    score: number;
+  } | null = null;
   let last: {
     attempt: Attempt;
     review: Verdict;
@@ -1951,7 +2047,29 @@ export async function runTask(ctx: Ctx, task: PlanTask): Promise<TaskResult> {
       paths: attempt.paths, evidence: ctx.evidence,
       requiredTexts: ctx.brief.deliverables.map((d) => d.type),
     });
+    // 防止纯文字 PDF/DOCX 冒充图片作品集过审：明确要求嵌入图片时按实测嵌入图片数硬核验。
+    const imgReq =
+      task.kind === "document" && ["pdf", "docx"].includes(task.format)
+        ? requiredDocumentImages([
+            task.title,
+            task.instructions,
+            item?.type || "",
+            ...task.acceptance,
+            ...(item?.limits || []),
+          ])
+        : null;
+    const actualImages = metrics.reduce((n, m) => n + (m.imageCount || 0), 0);
+    const imageGateIssues: string[] = [];
+    if (imgReq && actualImages < imgReq.minimum)
+      imageGateIssues.push(
+        `规则「文档需实际嵌入至少 ${imgReq.minimum} 张图片」未通过：实测仅嵌入 ${actualImages} 张图片，不得以 Markdown 文字链接冒充实际图片`,
+      );
+    if (imgReq?.maximum && actualImages > imgReq.maximum)
+      imageGateIssues.push(
+        `规则「文档嵌入图片不超过 ${imgReq.maximum} 张」未通过：实测嵌入 ${actualImages} 张图片`,
+      );
     const failures = [
+      ...imageGateIssues,
       ...missingInput.map((x) => `缺少完成作品所需资料：${x}`),
       ...(missingInput.length
         ? ["以上资料本轮无法取得，正文不能留【待补充】【待填写】占位：请改写对应位置，使作品不依赖这些资料——把结果写成设计目标或验证方案、改用给定来源里已有的事实，或删去支撑不了的主张；不得编造。只有官方规则要求必须由用户本人提供的材料才保留在 needs_input。"]
@@ -1980,15 +2098,15 @@ export async function runTask(ctx: Ctx, task: PlanTask): Promise<TaskResult> {
           suggestions: [],
           needs_input: [],
         } satisfies Verdict)
-      : checkpoint.review || (await verify(ctx, task, attempt, currentBrowser, reuse));
+      : checkpoint.review || (await verify(ctx, task, attempt, currentBrowser, reuse, metrics));
     // 内容结论先落盘，版面检查中断后只继续未完成的视觉验收。
     checkpoint.review = review;
     await atomicWriteJson(checkpointPath, checkpoint);
-    // 内容评审通过后，再让排版 Agent 看渲染出的真实页面；版面缺陷作为阻塞问题交回返工。
+    // 内容评审通过后，再让排版 Agent 看渲染出的真实页面（支持 DOCX、PPTX 与 PDF）；版面缺陷作为阻塞问题交回返工。
     if (
       review.pass &&
       !review.visual &&
-      ["docx", "pptx"].includes(task.format) &&
+      ["docx", "pptx", "pdf"].includes(task.format) &&
       attempt.paths[0]
     ) {
       await announce(ctx, {
@@ -2022,8 +2140,46 @@ export async function runTask(ctx: Ctx, task: PlanTask): Promise<TaskResult> {
     // 评审认为需要用户补充的资料汇总给用户；作品本身的缺陷必须写在 issues 里才触发返工。
     checkpoint.review = review;
     await atomicWriteJson(checkpointPath, checkpoint);
-    if (review.pass)
-      return done("submission", attempt, review, round + 1, [], requirements);
+    if (review.pass) {
+      const score = review.scorecard?.total;
+      if (!bestPassing || (score ?? 100) >= bestPassing.score) {
+        bestPassing = {
+          attempt,
+          review,
+          requirements,
+          rounds: round + 1,
+          score: score ?? 100,
+        };
+      }
+      const q = qualitySettings(ctx.cfg);
+      const canPolish =
+        q.rubricScoring &&
+        q.polishRounds > 0 &&
+        polishUsed < q.polishRounds &&
+        score !== undefined &&
+        score < q.minScore &&
+        round < rounds - 1 &&
+        !item?.official_template &&
+        task.kind !== "translation";
+      if (canPolish) {
+        polishUsed++;
+        const cliches =
+          task.kind === "document" ? detectAiCliches(attempt.reviewText || "") : [];
+        feedback = [
+          ...buildPolishFeedback(review.scorecard!, cliches, q.minScore),
+          ...review.suggestions.slice(0, 5).map((x) => `（评委建议）${x}`),
+        ];
+        continue;
+      }
+      return done(
+        "submission",
+        bestPassing.attempt,
+        bestPassing.review,
+        bestPassing.rounds,
+        [],
+        bestPassing.requirements,
+      );
+    }
     last = { attempt, review, requirements };
     feedback = review.issues.length
       ? [
@@ -2033,6 +2189,16 @@ export async function runTask(ctx: Ctx, task: PlanTask): Promise<TaskResult> {
         ]
       : ["评审未通过但未给出具体问题，请对照验收标准全面检查"];
   }
+  // 若之前已有完整通过底线与视觉验收的版本，但定向冲奖精修轮未能通过，单调回退到已通过的最佳版本。
+  if (bestPassing)
+    return done(
+      "submission",
+      bestPassing.attempt,
+      bestPassing.review,
+      bestPassing.rounds,
+      [],
+      bestPassing.requirements,
+    );
   throw Error(
     `${task.title} 经 ${rounds} 轮返工仍未通过验收：${last!.review.issues.join("；")}`,
   );
@@ -2254,7 +2420,59 @@ export async function runOrchestration(
     inputContext,
     selection: input.selection,
     images: {},
+    projectSpec: createProjectSpec(brief, idea),
   };
+  const specPath = join(jobDir(ctx), "project-spec.json");
+  // 工科/算法/创客/商业计划类赛事：先运行隔离数值仿真沙箱，产出可复现指标和高清科研图表，注入单一事实源。
+  if (
+    qualitySettings(cfg).simulation &&
+    needsSimulation(brief, idea) &&
+    planned.plan.tasks.some((t) => t.kind === "document" || t.kind === "slides")
+  ) {
+    const simDir = join(jobDir(ctx), "simulation");
+    const simReportPath = join(simDir, "simulation-report.json");
+    try {
+      let sim: Awaited<ReturnType<typeof generateAndRunSimulation>> | null = null;
+      try {
+        const cachedSim = JSON.parse(await readFile(simReportPath, "utf8"));
+        if (cachedSim?.output?.metrics?.length && Array.isArray(cachedSim.charts))
+          sim = cachedSim;
+      } catch { /* 尚无缓存仿真结果，正常执行。 */ }
+      if (!sim) {
+        await announce(ctx, {
+          stage: "simulation",
+          action: "运行数值仿真沙箱并生成可复现定量指标与图表",
+        });
+        sim = await generateAndRunSimulation(
+          gateway,
+          {
+            brief,
+            idea,
+            evidenceSummary: evidence
+              .slice(0, 4)
+              .map((e) => `${e.title}: ${e.text.slice(0, 600)}`)
+              .join("\n"),
+          },
+          simDir,
+        );
+        store.artifact(jobId, "simulation", sim.reportPath, modelLabel(cfg, "writer"));
+      }
+      ctx.projectSpec = attachSimulationToSpec(ctx.projectSpec!, sim);
+      for (const ch of sim.charts)
+        ctx.images[ch.id] = { path: ch.path, title: ch.title, caption: ch.caption };
+    } catch (e) {
+      if (isJobControlError(e) || budgetError(e)) throw e;
+      await record(
+        cfg,
+        store,
+        jobId,
+        "simulation-error.json",
+        { error: message(e), continued: true },
+        null,
+      ).catch(() => {});
+    }
+  }
+  await atomicWriteJson(specPath, ctx.projectSpec);
   const progressPath = join(jobDir(ctx), "orchestration.json");
   let progress: Record<string, TaskResult> = {};
   try {
@@ -2266,10 +2484,15 @@ export async function runOrchestration(
   }
   const results: TaskResult[] = [];
   const resumeChecks: { id: string; reused: boolean; reason?: string }[] = [];
-  // 图片先做，PPT 和文档才能放入真实生成的图片；其余任务保持计划顺序。
+  const isPrimaryDoc = (t: PlanTask) =>
+    t.kind === "document" &&
+    !brief.deliverables[t.deliverable]?.official_template &&
+    !/承诺书|声明|报名表|信息表|汇总表|分工/.test(t.title);
+  // 执行分层：图片先行（供文档/PPT 嵌入）→ 主文档定稿（沉淀单一事实源）→ PPT/软件/附表对齐主文档。
   const ordered = [
     ...planned.plan.tasks.filter((t) => t.kind === "image"),
-    ...planned.plan.tasks.filter((t) => t.kind !== "image"),
+    ...planned.plan.tasks.filter((t) => isPrimaryDoc(t)),
+    ...planned.plan.tasks.filter((t) => t.kind !== "image" && !isPrimaryDoc(t)),
   ];
   for (const task of ordered) {
     const prior = progress[task.id];
@@ -2312,6 +2535,25 @@ export async function runOrchestration(
         title: task.title,
         caption: task.instructions.slice(0, 120),
       };
+    if (
+      isPrimaryDoc(task) &&
+      !ctx.projectSpec?.primaryWork &&
+      result.status === "submission" &&
+      result.artifactPaths[0]
+    ) {
+      try {
+        const { readSource } = await import("../competition/sources.js");
+        const body = await readSource(result.artifactPaths[0]);
+        if (body.trim()) {
+          ctx.projectSpec!.primaryWork = extractPrimaryDigest(
+            task.id,
+            result.workTitle || task.title,
+            body,
+          );
+          await atomicWriteJson(specPath, ctx.projectSpec);
+        }
+      } catch { /* 读取主文档摘要失败不阻断交付。 */ }
+    }
     if (!reusable)
       result.receipt = await createTaskReceipt(
         task,

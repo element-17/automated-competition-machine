@@ -10,11 +10,17 @@ import { SqliteSaver } from "@langchain/langgraph-checkpoint-sqlite";
 import { join } from "node:path";
 import { z } from "zod";
 import type { AppConfig } from "../core/config.js";
+import { qualitySettings } from "../core/config.js";
 import type { Store } from "../core/store.js";
 import { Brief, type ModelGateway } from "../core/types.js";
 import { parseJSON } from "../core/gateway.js";
 import { modelLabel } from "../agents/models.js";
 import { researchGraph } from "./workflow.js";
+import {
+  interactiveAvailable,
+  runAssetGate,
+  runConceptGate,
+} from "./interactive-gates.js";
 import {
   collectCandidateEvidence,
   compareCandidates,
@@ -136,8 +142,25 @@ export function autonomousGraph(
           (e.kind === "entry" || e.kind === "official" || e.kind === "user") &&
           (e.kind === "user" || !/往届|获奖名单|获奖作品|优秀作品/.test(`${e.title} ${e.text}`)),
       );
-      // 往届内容只进入比较，不作为独立初稿的示例或正文模板。
-      const { research: _research, ...independentBrief } = brief;
+      // 往届具体作品正文只进入比较，不作为初稿模板；但抽象的评委偏好与饱和题材画像、以及跨赛事历史选题去重清单要前置喂给选题。
+      const { research, ...independentBrief } = brief;
+      const benchmark = research?.benchmark;
+      const hasBenchmark =
+        benchmark &&
+        (benchmark.winning_patterns.length ||
+          benchmark.judge_preferences.length ||
+          benchmark.overused_topics.length ||
+          benchmark.differentiator_angles.length);
+      const benchmarkHint = hasBenchmark
+        ? `\n赛道评委偏好与标杆特征（仅作立意和避坑参考，不得照搬具体往届项目）：${JSON.stringify(benchmark)}`
+        : "";
+      const recentHistory = store.recentConcepts(s.competitionId, 12);
+      const antiClicheHint = recentHistory.length
+        ? `\n跨赛事防撞题约束（以下人群/场景已在其他比赛中使用过，本场严禁重复相同对象、人群或母题，必须开拓全新切入点）：${JSON.stringify(recentHistory.map((h) => ({ title: h.title, audience: h.audience, problem: h.problem.slice(0, 80) })))}`
+        : "";
+      const profileHint = cfg.profile?.major
+        ? `\n参赛者学科背景参考（可适度发挥专业特长，但不限于该领域）：${[cfg.profile.college, cfg.profile.major, cfg.profile.identity].filter(Boolean).join(" / ")}`
+        : "";
       const ideas = [];
       const branches = await Promise.allSettled(
         conceptRoutes(brief).map(async (angle, index) => {
@@ -146,7 +169,7 @@ export function autonomousGraph(
             modelLabel(cfg, "writer"),
             async () => parseJSON(await gateway.generate(
               "writer",
-              `${Guard}\n为以下比赛独立提出一个作品方案，本分支视角：${angle}。按比赛类型发展一个具体、有用的方向。技术方案说明场景约束、工作机制和验证方法；非技术作品按创作语境说明主题、材料、叙事或视觉组织，以及事实核对或受众理解，不强塞技术流程、基线或消融实验。只输出 JSON {"title":"","audience":"受众与场景","problem":"要解决的问题或表达的主题","mechanism":"具体做法或表达结构","verification":"适合本作品的检查或验证方式","evidence_urls":[]}。未知效果不得写成已实测。evidence_urls 只允许本次资料已获取的 URL，无依据留空。规则：${JSON.stringify(independentBrief)}\n资料：${JSON.stringify(neutral)}`,
+              `${Guard}\n为以下比赛独立提出一个作品方案（追求冲奖级区分度），本分支视角：${angle}。优先选择当前数字化工具、公开数据、软件原型或可复现数值仿真能够闭环做出硬核成果的切口，避开高度依赖无法获取的线下实拍照片或大量真人志愿者的选题。技术方案说明场景约束、工作机制和可复现验证方法；非技术作品按创作语境说明主题、材料、叙事或视觉组织，以及事实核对或受众理解，不强塞技术流程、基线或消融实验。只输出 JSON {"title":"","audience":"受众与场景","problem":"要解决的问题或表达的主题","mechanism":"具体做法或表达结构","verification":"适合本作品的检查或验证方式","evidence_urls":[]}。未知效果不得写成已实测。evidence_urls 只允许本次资料已获取的 URL，无依据留空。${profileHint}${benchmarkHint}${antiClicheHint}\n规则：${JSON.stringify(independentBrief)}\n资料：${JSON.stringify(neutral)}`,
               "writer",
             )),
           );
@@ -204,8 +227,17 @@ export function autonomousGraph(
       for (let round = 0; round <= 1; round++) {
         try {
           const result = await compareCandidates(cfg, store, gateway, s.jobId, brief, ideas, candidateEvidence);
-          await record(cfg, store, s.jobId, "concepts.json", ideas, modelLabel(cfg, "writer"));
-          return { ...result, ideas, candidateEvidence };
+          let finalIdeas = ideas;
+          let finalChoice = result.choice;
+          if (interactiveAvailable(qualitySettings(cfg).interactiveGates)) {
+            const gated = await runConceptGate(ideas, result.choice);
+            finalIdeas = gated.ideas;
+            finalChoice = gated.choice;
+          }
+          await record(cfg, store, s.jobId, "concepts.json", finalIdeas, modelLabel(cfg, "writer"));
+          const chosen = finalIdeas[finalChoice.selected - 1];
+          if (chosen) store.recordConcept(s.jobId, s.competitionId, chosen);
+          return { ...result, choice: finalChoice, ideas: finalIdeas, candidateEvidence };
         } catch (e) {
           if (!(e instanceof DuplicateCandidatesError)) throw e;
           if (round === 1) throw Error(`候选方案比较失败：已完成1轮定向修正，所选方案仍有明确核心雷同；${e.message}`);
@@ -228,6 +260,8 @@ export function autonomousGraph(
     })
     // 中心调度：规划 Agent 拆解任务，按产物类型分派执行 Agent，评审 Agent 验收并返工。
     .addNode("make", async (s: State) => {
+      if (interactiveAvailable(qualitySettings(cfg).interactiveGates))
+        await runAssetGate(store, s.competitionId);
       const idea = s.ideas?.length
         ? s.ideas[s.choice.selected - 1] || null
         : null;

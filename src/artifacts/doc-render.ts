@@ -4,11 +4,13 @@
  * Windows 优先用本机 Word 导出，其余平台（或 Word 不可用时）用 LibreOffice。
  */
 import { execFile } from "node:child_process";
-import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { basename, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
+import { chromium } from "playwright";
+import { browserAvailability } from "./browser-checks.js";
 
 const exec = promisify(execFile);
 
@@ -58,16 +60,17 @@ async function viaLibreOffice(file: string, dir: string, out: string): Promise<v
   if (made !== out) await writeFile(out, await readFile(made));
 }
 
-/** 把 DOCX 转成 PDF 并打开；全部转换方式失败时抛错，不能渲染就不能声称版式合格。 */
-export async function renderDocx(source: string): Promise<RenderedDoc> {
+/** 把 DOCX 转换为 PDF 文件；优先使用本机 Word，其次 LibreOffice。 */
+export async function docxToPdf(source: string, outPath: string): Promise<void> {
   const file = resolve(source);
-  const dir = await mkdtemp(join(tmpdir(), "docpdf-"));
-  const out = join(dir, "rendered.pdf");
+  const target = resolve(outPath);
+  const dir = await mkdtemp(join(tmpdir(), "docx2pdf-"));
+  const tempOut = join(dir, "rendered.pdf");
   const failures: string[] = [];
   const converters: [string, () => Promise<void>][] = [
     ...(process.platform === "win32" && !process.env.COMPETE_SOFFICE
-      ? [["Word", () => viaWord(file, dir, out)] as [string, () => Promise<void>]] : []),
-    ["LibreOffice", () => viaLibreOffice(file, dir, out)],
+      ? [["Word", () => viaWord(file, dir, tempOut)] as [string, () => Promise<void>]] : []),
+    ["LibreOffice", () => viaLibreOffice(file, dir, tempOut)],
   ];
   try {
     let done = false;
@@ -76,34 +79,115 @@ export async function renderDocx(source: string): Promise<RenderedDoc> {
       catch (e) { failures.push(`${name}：${reason(e)}`); }
     }
     if (!done)
-      throw Error(`无法把 Word 文档渲染成页面（${failures.join("；")}）；请安装 Microsoft Word 或 LibreOffice，或用 COMPETE_SOFFICE 指定 soffice 路径`);
-    const pdfjs = await import("pdfjs-dist/legacy/build/pdf.mjs");
-    const doc = await pdfjs.getDocument({
-      data: new Uint8Array(await readFile(out)), useSystemFonts: true, verbosity: 0,
-    }).promise;
-    const text: string[] = [];
+      throw Error(`无法把 Word 文档转换为 PDF（${failures.join("；")}）；请安装 Microsoft Word 或 LibreOffice，或用 COMPETE_SOFFICE 指定 soffice 路径`);
+    await mkdir(dirname(target), { recursive: true });
+    await writeFile(target, await readFile(tempOut));
+  } finally {
+    await rm(dir, { recursive: true, force: true }).catch(() => {});
+  }
+}
+
+/** 离线把 HTML 渲染成 A4 PDF（用于画册/作品集 PDF 或无 Office 环境下的富排版 PDF）。 */
+export async function renderHtmlToPdf(html: string, outPath: string): Promise<void> {
+  const avail = browserAvailability();
+  if (!avail.available || !avail.executablePath)
+    throw Error(avail.reason || "浏览器不可用，无法通过 Chromium 导出 PDF");
+  const browser = await chromium.launch({
+    executablePath: avail.executablePath,
+    headless: true,
+    timeout: 25_000,
+  });
+  try {
+    const context = await browser.newContext({ offline: true });
+    const page = await context.newPage();
+    await page.setContent(html, { waitUntil: "load", timeout: 30_000 });
+    await mkdir(dirname(resolve(outPath)), { recursive: true });
+    await page.pdf({
+      path: resolve(outPath),
+      format: "A4",
+      printBackground: true,
+      preferCSSPageSize: true,
+    });
+    await context.close();
+  } finally {
+    await browser.close().catch(() => {});
+  }
+}
+
+async function openPdfAsRendered(
+  pdfPath: string,
+  cleanup?: () => Promise<void>,
+): Promise<RenderedDoc> {
+  const pdfjs = await import("pdfjs-dist/legacy/build/pdf.mjs");
+  const doc = await pdfjs.getDocument({
+    data: new Uint8Array(await readFile(pdfPath)),
+    useSystemFonts: true,
+    verbosity: 0,
+  }).promise;
+  const text: string[] = [];
+  for (let n = 1; n <= doc.numPages; n++) {
+    const page = await doc.getPage(n);
+    text.push((await page.getTextContent()).items.map((i) => ("str" in i ? i.str : "")).join(""));
+  }
+  return {
+    pages: doc.numPages,
+    text,
+    async png(n) {
+      const { createCanvas } = await import("@napi-rs/canvas");
+      const page = await doc.getPage(n);
+      const viewport = page.getViewport({ scale: 1.6 });
+      const canvas = createCanvas(Math.ceil(viewport.width), Math.ceil(viewport.height));
+      await page.render({
+        canvasContext: canvas.getContext("2d") as never, viewport, canvas: canvas as never,
+      }).promise;
+      return canvas.toBuffer("image/png");
+    },
+    async dispose() {
+      await doc.destroy().catch(() => {});
+      if (cleanup) await cleanup();
+    },
+  };
+}
+
+/** 统计 PDF 实际绘制的图片对象数，防止纯文字假图集 PDF 冒充图片作品通过验收。 */
+export async function countPdfImages(source: string): Promise<number> {
+  const pdfjs = await import("pdfjs-dist/legacy/build/pdf.mjs");
+  const doc = await pdfjs.getDocument({
+    data: new Uint8Array(await readFile(resolve(source))),
+    useSystemFonts: true,
+    verbosity: 0,
+  }).promise;
+  const imageOps = new Set<number>([
+    pdfjs.OPS.paintImageXObject,
+    pdfjs.OPS.paintInlineImageXObject,
+    pdfjs.OPS.paintImageMaskXObject,
+    pdfjs.OPS.paintImageXObjectRepeat,
+  ].filter((x): x is number => typeof x === "number"));
+  let count = 0;
+  try {
     for (let n = 1; n <= doc.numPages; n++) {
       const page = await doc.getPage(n);
-      text.push((await page.getTextContent()).items.map((i) => ("str" in i ? i.str : "")).join(""));
+      const ops = await page.getOperatorList();
+      for (const fn of ops.fnArray) if (imageOps.has(fn)) count++;
     }
-    return {
-      pages: doc.numPages,
-      text,
-      async png(n) {
-        const { createCanvas } = await import("@napi-rs/canvas");
-        const page = await doc.getPage(n);
-        const viewport = page.getViewport({ scale: 1.6 });
-        const canvas = createCanvas(Math.ceil(viewport.width), Math.ceil(viewport.height));
-        await page.render({
-          canvasContext: canvas.getContext("2d") as never, viewport, canvas: canvas as never,
-        }).promise;
-        return canvas.toBuffer("image/png");
-      },
-      async dispose() {
-        await doc.destroy().catch(() => {});
-        await rm(dir, { recursive: true, force: true }).catch(() => {});
-      },
-    };
+    return count;
+  } finally {
+    await doc.destroy().catch(() => {});
+  }
+}
+
+/** 直接打开已有 PDF，逐页提取文字和 PNG 截图供视觉版面审查。 */
+export async function renderPdf(source: string): Promise<RenderedDoc> {
+  return openPdfAsRendered(resolve(source));
+}
+
+/** 把 DOCX 转成 PDF 并打开；全部转换方式失败时抛错，不能渲染就不能声称版式合格。 */
+export async function renderDocx(source: string): Promise<RenderedDoc> {
+  const dir = await mkdtemp(join(tmpdir(), "docpdf-"));
+  const out = join(dir, "rendered.pdf");
+  try {
+    await docxToPdf(source, out);
+    return await openPdfAsRendered(out, () => rm(dir, { recursive: true, force: true }).catch(() => {}));
   } catch (e) {
     await rm(dir, { recursive: true, force: true }).catch(() => {});
     throw e;
@@ -152,5 +236,8 @@ export function textCoverage(source: string, pages: string[]): {
     details: `全部 ${pages.length} 页的文字与文档原文比对一致（${count} 处取样命中 ${found} 处，结尾完整）` };
 }
 
-/** 实际使用的渲染器；测试可替换，避免依赖本机 Word。 */
-export const renderers: { docx: (file: string) => Promise<RenderedDoc> } = { docx: renderDocx };
+/** 实际使用的渲染器；测试可替换，避免依赖本机 Word 或 PDF 渲染。 */
+export const renderers: {
+  docx: (file: string) => Promise<RenderedDoc>;
+  pdf: (file: string) => Promise<RenderedDoc>;
+} = { docx: renderDocx, pdf: renderPdf };

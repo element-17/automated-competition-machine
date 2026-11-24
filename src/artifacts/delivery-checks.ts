@@ -6,6 +6,7 @@ import type { Brief } from "../core/types.js";
 import { readSource } from "../competition/sources.js";
 import { hasFieldValue, inspectTemplate } from "./templates.js";
 import { readXlsx, xlsxText } from "./xlsx.js";
+import { countPdfImages } from "./doc-render.js";
 
 export type RequirementCheck = {
   id: string;
@@ -34,6 +35,16 @@ export type ArtifactMetrics = {
   fields?: string[];
   /** 按真实标签位置读取的值；存在栏目不等于已经填写。 */
   fieldValues?: Record<string, string[]>;
+  /** 实际嵌入的图片对象数（DOCX / PDF / PPTX）。 */
+  imageCount?: number;
+  /** 实际表格数（DOCX）。 */
+  tableCount?: number;
+  /** 从 DOCX XML 读取的真实样式元数据，供评审直接核验字体、字号和行距。 */
+  typography?: {
+    bodyFont?: string;
+    bodySizePt?: number;
+    lineSpacing?: number;
+  };
   /** 导出的全文，用于核对“稿末注明姓名、联系电话”这类内容要求。 */
   text?: string;
   errors: string[];
@@ -228,10 +239,14 @@ export async function measureArtifact(path: string): Promise<ArtifactMetrics> {
       result.entries = Object.values(zip.files)
         .filter((f) => !f.dir)
         .map((f) => f.name);
-      if (ext === ".pptx")
+      if (ext === ".pptx") {
         result.pages = result.entries.filter((p) =>
           /^ppt\/slides\/slide\d+\.xml$/.test(p),
         ).length;
+        result.imageCount = result.entries.filter((p) =>
+          /^ppt\/media\/.+\.(?:png|jpe?g|webp|gif)$/i.test(p),
+        ).length;
+      }
     }
     if (ext === ".pdf") {
       const pdfjs = await import("pdfjs-dist/legacy/build/pdf.mjs");
@@ -245,6 +260,7 @@ export async function measureArtifact(path: string): Promise<ArtifactMetrics> {
       } finally {
         await doc.destroy();
       }
+      result.imageCount = await countPdfImages(path).catch(() => 0);
     }
     if ([".png", ".jpg", ".jpeg"].includes(ext)) {
       const info = await sharp(path).metadata();
@@ -268,11 +284,35 @@ export async function measureArtifact(path: string): Promise<ArtifactMetrics> {
           .filter(([h]) => h),
       );
     }
-    // 报名表类规则常写成“需填写团队名称、参赛赛题和所在赛区”，用文档里的实际标签逐项核对。
+    // 报名表类规则常写成“需填写团队名称、参赛赛题和所在赛区”，用文档里的实际标签逐项核对；
+    // 同时读取 DOCX 实际表格数、嵌入图片数与默认字体/字号/行距，供评审直接核验排版属性。
     if (ext === ".docx") {
-      const inspection = inspectTemplate(await readFile(path), false);
+      const rawBuf = await readFile(path);
+      const inspection = inspectTemplate(rawBuf, false);
       result.fields = inspection.labels;
       result.fieldValues = inspection.fieldValues;
+      try {
+        const zip = await JSZip.loadAsync(rawBuf);
+        const docXml = (await zip.file("word/document.xml")?.async("string")) || "";
+        const stylesXml = (await zip.file("word/styles.xml")?.async("string")) || "";
+        result.tableCount = (docXml.match(/<w:tbl\b/g) || []).length;
+        const drawings = (docXml.match(/<w:drawing\b|<w:pict\b/g) || []).length;
+        const media = Object.keys(zip.files).filter((n) =>
+          /^word\/media\/.+\.(?:png|jpe?g|webp|gif)$/i.test(n),
+        ).length;
+        result.imageCount = Math.max(drawings, media);
+        const fontMatch = /<w:rFonts[^>]*w:(?:eastAsia|ascii)="([^"]+)"/.exec(stylesXml) ||
+          /<w:rFonts[^>]*w:(?:eastAsia|ascii)="([^"]+)"/.exec(docXml);
+        const szMatch = /<w:sz[^>]*w:val="(\d+)"/.exec(stylesXml) ||
+          /<w:sz[^>]*w:val="(\d+)"/.exec(docXml);
+        const lineMatch = /<w:spacing[^>]*w:line="(\d+)"/.exec(stylesXml) ||
+          /<w:spacing[^>]*w:line="(\d+)"/.exec(docXml);
+        result.typography = {
+          ...(fontMatch ? { bodyFont: fontMatch[1] } : {}),
+          ...(szMatch ? { bodySizePt: Number(szMatch[1]) / 2 } : {}),
+          ...(lineMatch ? { lineSpacing: Number((Number(lineMatch[1]) / 240).toFixed(2)) } : {}),
+        };
+      } catch { /* 非标准打包已在上方由 readSource / inspectTemplate 报告错误。 */ }
     }
   } catch (e) {
     result.errors.push(e instanceof Error ? e.message : String(e));
@@ -711,4 +751,55 @@ export function checkDelivery(
     );
   }
   return checks;
+}
+
+/** 识别文档/PDF 交付物是否明确要求实际嵌入图片（防止纯文字 PDF 冒充图片作品集过审）。 */
+export function requiredDocumentImages(texts: string[]): { minimum: number; maximum?: number } | null {
+  const joined = texts.filter(Boolean).join(" ");
+  const exact =
+    /(?:收录|包含|嵌入|展示|整合)[^。\n，,]{0,12}?(?:严格为|为|共)?\s*(\d+)\s*(?:张|幅)(?:[^。\n，,]{0,8}?(?:图|图片|作品|成品|照片|效果图))/.exec(joined) ||
+    /(?:图片|插图|成图|渲染图)[^。\n，,]{0,10}?(?:总数|数量)?(?:严格为|精确为|须为|为|共)\s*(\d+)\s*(?:张|幅)/.exec(joined);
+  if (exact) {
+    const n = Number(exact[1]);
+    if (n >= 1 && n <= 50) return { minimum: n, maximum: n };
+  }
+  const minOnly =
+    /(?:至少|不少于)\s*(\d+)\s*(?:张|幅)(?:[^。\n，,]{0,8}?(?:图|图片|插图|效果图|照片))/.exec(joined);
+  if (minOnly) {
+    const n = Number(minOnly[1]);
+    if (n >= 1 && n <= 50) return { minimum: n };
+  }
+  const maxOnly = /(?:不超过|不得超过|最多|至多)\s*(\d+)\s*(?:张|幅)(?:[^。\n，,]{0,8}?(?:图|图片|作品))/.exec(joined);
+  if (maxOnly && /图片作品|画册|作品集|图集|三联图|海报合集|AI生成图片/i.test(joined)) {
+    const max = Number(maxOnly[1]);
+    if (max >= 1 && max <= 50) return { minimum: 1, maximum: max };
+  }
+  if (/图片作品（PDF|PDF整合文档.*图|三页图片PDF|图片PDF合集|画册式图文/i.test(joined))
+    return { minimum: 1 };
+  return null;
+}
+
+/** 生成实际导出文件的客观实测摘要，喂给评审模型避免“看不到 Word 排版属性”的误判。 */
+export function formatArtifactMetadata(metrics: ArtifactMetrics[]): string {
+  if (!metrics.length) return "无已导出文件";
+  return metrics
+    .map((m) => {
+      const parts = [`文件=${basename(m.path)}`, `体积=${Math.round(m.bytes / 1024)}KB`];
+      if (m.pages !== undefined) parts.push(`页数=${m.pages}`);
+      if (m.characters !== undefined) parts.push(`非空白字符=${m.characters}`);
+      if (m.tableCount !== undefined) parts.push(`表格数=${m.tableCount}`);
+      if (m.imageCount !== undefined) parts.push(`实测嵌入图片数=${m.imageCount}`);
+      if (m.sheets !== undefined) parts.push(`工作表=${m.sheets}（总行=${m.rows ?? 0}）`);
+      if (m.width && m.height) parts.push(`分辨率=${m.width}x${m.height}`);
+      if (m.typography) {
+        const t = [
+          m.typography.bodyFont ? `正文字体=${m.typography.bodyFont}` : "",
+          m.typography.bodySizePt ? `字号=${m.typography.bodySizePt}pt` : "",
+          m.typography.lineSpacing ? `行距=${m.typography.lineSpacing}倍` : "",
+        ].filter(Boolean);
+        if (t.length) parts.push(`DOCX样式(${t.join("，")})`);
+      }
+      return parts.join("，");
+    })
+    .join("；");
 }

@@ -262,6 +262,37 @@ export function modelProblems(cfg: ModelConfig): string[] {
   return out;
 }
 
+/** 作品质量配置提醒（非阻塞）：指出同源模型自写自审、轻量模型担纲主笔/评审、研究运行时关闭等质量风险。 */
+export function modelWarnings(cfg: ModelConfig): string[] {
+  const out: string[] = [];
+  try {
+    const writer = resolveAgent(cfg, "writer");
+    const reviewer = resolveAgent(cfg, "reviewer");
+    const research = resolveAgent(cfg, "research");
+    if (
+      writer.provider.id === reviewer.provider.id &&
+      writer.model === reviewer.model
+    )
+      out.push(
+        `写作与评审共用同一模型（${writer.provider.id}/${writer.model}），容易产生同源盲区放过低质量或套话稿件；建议为评审配置不同家族或更强推理模型`,
+      );
+    const lightRe = /(?:^|[-_/.])(?:flash|mini|lite|haiku|nano)(?:$|[-_/.0-9])/i;
+    if (lightRe.test(writer.model))
+      out.push(
+        `主笔写作模型（${writer.model}）为轻量型号，长篇专业论证与文学表达深度可能受限；建议升级为旗舰写作/推理模型`,
+      );
+    if (lightRe.test(reviewer.model))
+      out.push(
+        `评审模型（${reviewer.model}）为轻量型号，可能难以发现深层逻辑与技术硬伤；建议升级为强推理模型`,
+      );
+    if (!research.enabled)
+      out.push(
+        "研究 Agent 运行时已关闭（agents.research.enabled=false），难以深入追查往届获奖名单与公开高分作品",
+      );
+  } catch { /* 结构性配置错误由 modelProblems 统一报告。 */ }
+  return out;
+}
+
 export const keyNames = (p: Provider) =>
   p.apiKeyEnv ? keyAliases[p.apiKeyEnv] || [p.apiKeyEnv] : [];
 export const apiKey = (p: Provider) => {

@@ -1,0 +1,52 @@
+{
+  "id": "registration-form",
+  "name": "官方报名表模板填写（DOCX 模板保留）",
+  "url": "https://example.edu.cn/bench/registration-form",
+  "generateTemplate": true,
+  "brief": {
+    "title": "高校智能创新竞赛校内选拔赛",
+    "edition": "2026",
+    "eligibility": "本校全日制在校生",
+    "deadline": "2026-12-31",
+    "ai_rules": null,
+    "scoring": "材料完整规范、项目简介清晰",
+    "deliverables": [
+      {
+        "type": "校内选拔赛报名表",
+        "quantity": "1份",
+        "formats": ["docx"],
+        "limits": ["报名表需填写姓名、学校、学院、专业、联系电话；指导教师签字允许留空"],
+        "naming": "学校_作者姓名_报名表.docx",
+        "attachments": [],
+        "submission": "按官方 Word 模板填写后提交",
+        "official_template": "__LOCAL_TEMPLATE_URL__"
+      }
+    ],
+    "requires_idea": false,
+    "missing": [],
+    "citations": [
+      {
+        "field": "deliverables.0.formats",
+        "url": "https://example.edu.cn/bench/registration-form",
+        "quote": "请下载官方报名表模板（docx）填写完整后提交。"
+      }
+    ],
+    "research": { "past_winners": [], "past_works": [], "judging": [], "missing": [] }
+  },
+  "evidence": [
+    {
+      "url": "https://example.edu.cn/bench/registration-form",
+      "title": "校内选拔赛报名通知",
+      "kind": "official",
+      "text": "请下载官方报名表模板（docx）填写完整后提交，报名表需填写姓名、学校、学院、专业、联系电话，指导教师签字允许留空。"
+    }
+  ],
+  "idea": {
+    "title": "校园能源微网智能预测调度助手",
+    "audience": "校内选拔评审组",
+    "problem": "教学楼用电峰谷波动显著",
+    "mechanism": "基于时序负荷预测的轻量调度平台",
+    "verification": "数值仿真与原型演示",
+    "evidence_urls": []
+  }
+}

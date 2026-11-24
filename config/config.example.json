@@ -31,7 +31,8 @@
     "perHost": 4,
     "queriesPerRun": 8,
     "queries": [],
-    "screen": true
+    "screen": true,
+    "socialPlatforms": false
   },
   "execution": {
     "productionRounds": 4,
@@ -39,7 +40,34 @@
     "researchRounds": 3,
     "requestTimeoutSeconds": 300
   },
+  "quality": {
+    "rubricScoring": true,
+    "minScore": 82,
+    "polishRounds": 1,
+    "simulation": true,
+    "interactiveGates": false
+  },
   "maxCalls": 80,
   "sources": ["https://jsjds.blcu.edu.cn/"],
-  "profile": { "school": "", "identity": "" }
+  "profile": {
+    "school": "",
+    "college": "",
+    "major": "",
+    "identity": "",
+    "grade": "",
+    "className": "",
+    "name": "",
+    "studentId": "",
+    "idNumber": "",
+    "phone": "",
+    "email": "",
+    "qq": "",
+    "advisor": "",
+    "advisorPhone": "",
+    "advisorEmail": "",
+    "advisorDepartment": "",
+    "advisorTitle": "",
+    "teamName": "",
+    "members": []
+  }
 }

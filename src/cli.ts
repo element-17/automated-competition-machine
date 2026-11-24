@@ -13,6 +13,7 @@ import {
   agentReady,
   hasKey,
   modelProblems,
+  modelWarnings,
   resolveAgent,
   runtimeNames,
   runtimeProtocols,
@@ -101,6 +102,8 @@ program
         dataDir: cfg.dataDir,
         agents: agentRows(cfg),
         problems: modelProblems(cfg),
+        warnings: modelWarnings(cfg),
+        quality: cfg.quality,
         credentials: {
           writer: agentReady(cfg, "writer"),
           reviewer: agentReady(cfg, "reviewer"),
@@ -207,7 +210,11 @@ program
   .description("查看各 Agent 使用的供应商、模型和运行时")
   .action(() => {
     const cfg = loadConfig(program.opts().config);
-    print({ agents: agentRows(cfg), problems: modelProblems(cfg) });
+    print({
+      agents: agentRows(cfg),
+      problems: modelProblems(cfg),
+      warnings: modelWarnings(cfg),
+    });
   });
 program
   .command("agents-test")
@@ -754,9 +761,11 @@ program
   .description("按顺序处理已持久化的赛事队列")
   .option("--limit <number>", "本次最多处理的赛事数", Number, 3)
   .option("--budget <calls>", "每场赛事预算单位（默认使用长任务设置）", Number)
+  .option("--interactive-gates", "在选题确认与素材注入节点启用 30 秒人机协同确认")
   .action(async (opts) => {
     const { cfg, store } = context();
     try {
+      if (opts.interactiveGates) cfg.quality.interactiveGates = true;
       opts.budget ??= cfg.maxCalls;
       const processed = await workQueue(cfg, store, opts);
       print({ processed });
@@ -808,9 +817,11 @@ program
   .description("继续暂停或失败任务；队列任务重新排队")
   .argument("<job-id>")
   .option("--budget <calls>", "调整预算总上限", Number)
+  .option("--interactive-gates", "在选题确认与素材注入节点启用人机协同确认")
   .action(async (id, opts) => {
     const { cfg, store } = context();
     try {
+      if (opts.interactiveGates) cfg.quality.interactiveGates = true;
       const job = store.job(id);
       if (opts.budget !== undefined) store.setBudget(id, opts.budget);
       const next = store.resumeJob(id);
@@ -840,9 +851,11 @@ program
   .option("--limit <number>", "本次最多处理的赛事数", Number, 3)
   .option("--budget <calls>", "每场赛事预算单位（默认使用长任务设置）", Number)
   .option("--redo", "重新处理已完成的赛事")
+  .option("--interactive-gates", "在选题确认与素材注入节点启用 30 秒人机协同确认")
   .action(async (opts) => {
     const { cfg, store } = context();
     try {
+      if (opts.interactiveGates) cfg.quality.interactiveGates = true;
       opts.budget ??= cfg.maxCalls;
       if (opts.query && cfg.search.provider === "sources" && !opts.url)
         throw Error(

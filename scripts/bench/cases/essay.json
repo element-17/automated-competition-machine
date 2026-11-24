@@ -1,0 +1,51 @@
+{
+  "id": "essay",
+  "name": "散文创作（DOCX）",
+  "url": "https://example.edu.cn/bench/essay",
+  "brief": {
+    "title": "高校生态文学散文创作大赛",
+    "edition": "2026",
+    "eligibility": "全国全日制在校本科生及研究生",
+    "deadline": "2026-12-31",
+    "ai_rules": null,
+    "scoring": "立意深度 30%、文学艺术与现场质感 40%、语言节奏与结构 30%",
+    "deliverables": [
+      {
+        "type": "生态主题散文作品",
+        "quantity": "1份",
+        "formats": ["docx"],
+        "limits": ["正文不少于3000字", "稿末注明作者姓名、学校、联系电话"],
+        "naming": "学校_作者姓名_作品名称.docx",
+        "attachments": [],
+        "submission": "电子版提交",
+        "official_template": null
+      }
+    ],
+    "requires_idea": false,
+    "missing": [],
+    "citations": [
+      {
+        "field": "deliverables.0.formats",
+        "url": "https://example.edu.cn/bench/essay",
+        "quote": "应征作品请以 Word 文档（docx）提交，正文不少于3000字，稿末注明作者姓名、学校、联系电话。"
+      }
+    ],
+    "research": { "past_winners": [], "past_works": [], "judging": [], "missing": [] }
+  },
+  "evidence": [
+    {
+      "url": "https://example.edu.cn/bench/essay",
+      "title": "高校生态文学散文创作大赛征稿启事",
+      "kind": "official",
+      "text": "应征作品请以 Word 文档（docx）提交，正文不少于3000字，稿末注明作者姓名、学校、联系电话。命名规则：学校_作者姓名_作品名称.docx。正文要求宋体小四、1.5倍行距，切忌空泛议论，须有真实细腻的自然观察与细节描写。"
+    }
+  ],
+  "idea": {
+    "title": "松花江封冻前的七十二小时",
+    "audience": "高校文学期刊与散文赛评委",
+    "problem": "通过北方江岸气温骤降至结冰的细微生态变迁，写人与水岸生物在严冬门槛上的共生秩序",
+    "mechanism": "以三个昼夜的岸边巡河观察、浮冰碰撞声学质感、冬泳人与水鸟栖息带的交替展开白描叙事",
+    "verification": "逐段核对自然物候逻辑与去说教化细节密度",
+    "evidence_urls": []
+  }
+}

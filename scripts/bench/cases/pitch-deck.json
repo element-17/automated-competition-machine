@@ -1,0 +1,51 @@
+{
+  "id": "pitch-deck",
+  "name": "答辩演示文稿（语义化 PPTX + 仿真图表）",
+  "url": "https://example.edu.cn/bench/pitch-deck",
+  "brief": {
+    "title": "全国大学生人工智能应用创新答辩赛",
+    "edition": "2026",
+    "eligibility": "在校本科生及研究生",
+    "deadline": "2026-12-31",
+    "ai_rules": null,
+    "scoring": "场景痛点与商业价值 25%、技术方案深度 35%、量化对比与可行性 25%、视觉与答辩逻辑 15%",
+    "deliverables": [
+      {
+        "type": "现场答辩演示文稿",
+        "quantity": "1份",
+        "formats": ["pptx"],
+        "limits": ["页数：8-14页"],
+        "naming": "作品名称_作者姓名.pptx",
+        "attachments": [],
+        "submission": "答辩前上传 PPTX 文件",
+        "official_template": null
+      }
+    ],
+    "requires_idea": true,
+    "missing": [],
+    "citations": [
+      {
+        "field": "deliverables.0.formats",
+        "url": "https://example.edu.cn/bench/pitch-deck",
+        "quote": "复赛须提交现场答辩演示文稿（pptx 格式，8-14 页），包含痛点对比、系统架构、指标图表、成本表与落地路线图。"
+      }
+    ],
+    "research": { "past_winners": [], "past_works": [], "judging": [], "missing": [] }
+  },
+  "evidence": [
+    {
+      "url": "https://example.edu.cn/bench/pitch-deck",
+      "title": "人工智能应用创新答辩赛评审规则",
+      "kind": "official",
+      "text": "复赛须提交现场答辩演示文稿（pptx 格式，8-14 页），包含痛点对比、系统架构、指标图表、成本表与落地路线图。要求视觉层次清晰、单页文字精炼，切忌大段文字堆砌。"
+    }
+  ],
+  "idea": {
+    "title": "基于轻量化多光谱边缘推理的冷链生鲜早期腐败无损预警终端",
+    "audience": "区域农产品冷链分拣中心质检员",
+    "problem": "冷链叶菜与浆果早期霉变肉眼不可见，人工抽检滞后导致整批次损耗率高达 12%-18%",
+    "mechanism": "近红外-可见光双波段低成本光学模组配合量化 TinyML 分类器在分拣传送带端实现毫秒级无损初筛与温湿度漂移告警",
+    "verification": "以吞吐率、单件识别延迟与分拣降损 ROI 模型进行数值仿真验证",
+    "evidence_urls": []
+  }
+}

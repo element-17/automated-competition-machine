@@ -1,0 +1,51 @@
+{
+  "id": "poster",
+  "name": "视觉海报设计（PNG + 看图视觉验收）",
+  "url": "https://example.edu.cn/bench/poster",
+  "brief": {
+    "title": "全国高校科普视觉海报设计大赛",
+    "edition": "2026",
+    "eligibility": "全国高校在校学生",
+    "deadline": "2026-12-31",
+    "ai_rules": "允许使用 AI 辅助生成主视觉画面，须保持画面清晰无乱码水印",
+    "scoring": "主题表达与科学隐喻 35%、构图与色彩美学 40%、视觉识别与完整性 25%",
+    "deliverables": [
+      {
+        "type": "主题视觉海报",
+        "quantity": "1份",
+        "formats": ["png"],
+        "limits": ["文件大小不超过10MB"],
+        "naming": "作品名称_作者姓名.png",
+        "attachments": [],
+        "submission": "官网上传高清 PNG 图片",
+        "official_template": null
+      }
+    ],
+    "requires_idea": true,
+    "missing": [],
+    "citations": [
+      {
+        "field": "deliverables.0.formats",
+        "url": "https://example.edu.cn/bench/poster",
+        "quote": "参赛作品提交 1 张主题视觉海报（png 格式，文件大小不超过10MB），构图完整、主体突出。"
+      }
+    ],
+    "research": { "past_winners": [], "past_works": [], "judging": [], "missing": [] }
+  },
+  "evidence": [
+    {
+      "url": "https://example.edu.cn/bench/poster",
+      "title": "全国高校科普视觉海报设计大赛征稿通知",
+      "kind": "official",
+      "text": "参赛作品提交 1 张主题视觉海报（png 格式，文件大小不超过10MB），构图完整、主体突出。主题聚焦“微观生态与城市生物多样性”，严禁画面出现乱码文字、水印或多图拼贴。"
+    }
+  ],
+  "idea": {
+    "title": "苔藓里的微缩森林",
+    "audience": "高校科普展览观众与视觉设计评委",
+    "problem": "城市居民常忽视墙角与石缝中苔藓群落的固碳与微生态庇护价值",
+    "mechanism": "以微距博物志版画与光影纵深构图，展现露珠、苔藓孢子囊与微小昆虫构成的立体微缩雨林",
+    "verification": "视觉验收检查主体构图、光影层次、无乱码与图题边界完整",
+    "evidence_urls": []
+  }
+}

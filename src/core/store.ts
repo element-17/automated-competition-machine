@@ -73,6 +73,7 @@ export class Store {
       CREATE TABLE IF NOT EXISTS job_runs(job_id TEXT PRIMARY KEY REFERENCES jobs(id),owner TEXT NOT NULL,expires_at TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS queue_reviews(competition_id TEXT PRIMARY KEY REFERENCES competitions(id),decision TEXT NOT NULL,reason TEXT NOT NULL,source_url TEXT,quote TEXT,deadline TEXT,reviewer TEXT NOT NULL,reviewed_at TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS queue_review_history(id TEXT PRIMARY KEY,competition_id TEXT NOT NULL,decision TEXT NOT NULL,reason TEXT NOT NULL,source_url TEXT,quote TEXT,deadline TEXT,reviewer TEXT NOT NULL,reviewed_at TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS concept_history(job_id TEXT PRIMARY KEY,competition_id TEXT NOT NULL,title TEXT NOT NULL,audience TEXT NOT NULL DEFAULT '',problem TEXT NOT NULL DEFAULT '',created_at TEXT NOT NULL);
     `);
     if (
       !(
@@ -454,6 +455,38 @@ export class Store {
         "SELECT kind,path,model,created_at FROM artifacts WHERE job_id=? ORDER BY created_at",
       )
       .all(jobId);
+  }
+  /** 记录已选定的参赛选题，供后续不同比赛规避重复套路与人群场景。 */
+  recordConcept(
+    jobId: string,
+    competitionId: string,
+    idea: { title: string; audience?: string; problem?: string },
+  ) {
+    this.db
+      .prepare(
+        "INSERT OR REPLACE INTO concept_history(job_id,competition_id,title,audience,problem,created_at) VALUES(?,?,?,?,?,?)",
+      )
+      .run(
+        jobId,
+        competitionId,
+        idea.title.trim(),
+        (idea.audience || "").trim(),
+        (idea.problem || "").trim(),
+        new Date().toISOString(),
+      );
+  }
+  /** 读取其他赛事最近选定过的选题列表，用于跨赛事反套路去重。 */
+  recentConcepts(excludeCompetitionId: string, limit = 12) {
+    return this.db
+      .prepare(
+        "SELECT title,audience,problem,created_at AS createdAt FROM concept_history WHERE competition_id<>? ORDER BY created_at DESC LIMIT ?",
+      )
+      .all(excludeCompetitionId, Math.max(1, Math.min(50, Math.floor(limit)))) as {
+      title: string;
+      audience: string;
+      problem: string;
+      createdAt: string;
+    }[];
   }
   recentSubmissionArtifacts(jobId: string, limit = 21) {
     const job = this.job(jobId);

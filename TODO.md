@@ -3,50 +3,16 @@
 每项都写明了位置、做法和完成标准。做完一项跑一次 `npm test`，必须保持全绿。
 不要改动“验收不兜底”的原则：实测失败（failed）必须阻塞；无法自动核对（unverified）交人工终审。
 
-## A. 质量相关（优先）
+## A. 质量相关（已完成）
 
-### A1. DOCX 排版样式升级
-- 位置：`src/artifacts/artifacts.ts` 的 `markdownParagraphs` 和 `renderWork` 的 docx 分支。
-- 现状：只支持标题、无序列表、引用、加粗；全文宋体 12pt，没有页边距、页码设置。Markdown 表格、有序列表、`$公式$` 会原样变成普通文字（真实任务 f172ed60 的技术方案书里大量 `| a | b |` 表格和 LaTeX 公式都是这样坏掉的）。
-- 做法：
-  1. 解析 Markdown 表格（表头行 + `|---|` 分隔行 + 数据行）为 `docx` 的 `Table`，表头加粗、带边框、宽度 100%。
-  2. 有序列表（`1. `）用 numbering。
-  3. 标题用黑体，正文宋体小四、1.5 倍行距、首行缩进 2 字符；A4，页边距 2.54cm；页脚居中页码。
-  4. 行内 `$...$` 公式：先做最简处理——去掉 `$`，把 `\text{x}`→x、`\le`→≤、`\ge`→≥、`\approx`→≈、`\times`→×、`_{x}`/`^{x}` 转下标/上标 run；无法转换的保留原文。
-  5. 署名行（“作者：”“学校：”“联系电话：”这类短行）不首行缩进、右对齐或左对齐均可，但要一致。
-- 完成标准：在 `test/` 新增测试，用 mammoth/JSZip 回读生成的 docx，断言表格生成了 `w:tbl`、没有残留 `|---|` 和 `$`；`npm test` 全绿。
+- [x] **A1. DOCX 排版样式升级**：已实现完整 Markdown 表格（`w:tbl`）、有序/无序列表、LaTeX 上下标公式清理、黑体标题/宋体小四/1.5 倍行距/2.54cm 页边距/页码、署名行不缩进、嵌入式图片与离线 Mermaid/Chart 高清渲染（见 `src/artifacts/artifacts.ts`、`src/artifacts/diagrams.ts`）。
+- [x] **A2. PDF 导出与 DOCX 同等排版**：已导出 `docxToPdf` / `renderHtmlToPdf` / `renderPdf` / `countPdfImages`，支持正式文档同源转 PDF 与画册 `portfolio` 模式，并将 PDF 纳入 `checkLayout` 逐页视觉验收与实测图片数拦截。
+- [x] **A3. 固定样本评测脚本**：已建成 `scripts/bench.mjs` 及 5 份标杆样本（`scripts/bench/cases/*.json`），移除旧版 `realrun.mjs` / `realwrite.mjs`，新增 `npm run bench` 与 `npm run typecheck`。
+- [x] **A4. 报名表与扩展用户资料**：`UserProfile`、`config.ts`、`profile.ts`、`ui.ts` 已补齐身份证号、年级、班级、QQ、指导教师电话/邮箱/院系/职称与队员列表 `members`。
+- [x] **A5. 社交平台查询可配置**：新增 `search.socialPlatforms`（默认 `false`），默认研究提示词不再包含小红书/贴吧查询，并移除硬编码闲鱼/淘宝查询。
+- [x] **A6. PPT 语义化版式引擎与程序化检查**：新增 10 种语义化竞赛答辩母版 + 5 套主题（`src/artifacts/slide-templates.ts`），并在 `validateWork` 补齐标题字号、正文字号≥14、单页字数上限与 WCAG 对比度≥3.0 检查。
 
-### A2. PDF 导出与 DOCX 同等排版
-- 位置：`renderWork` 的 pdf 分支，目前是 pdfkit 把纯文本一把写进去，没有标题层级。
-- 做法：标题按层级用不同字号；段落首行缩进；表格至少按制表对齐输出。或者改为“先生成 docx，再用 `src/artifacts/doc-render.ts` 里的转换函数导出 PDF”（需要把 `viaWord`/`viaLibreOffice` 导出一个 `docxToPdf(file, out)`）。推荐后者，样式只维护一份。
-- 完成标准：有测试断言 PDF 页数 ≥1 且能提取到正文结尾。
-
-### A3. 固定样本评测脚本（最重要的长期项）
-- 位置：新建 `scripts/bench.mjs`，把根目录的 `realrun.mjs`、`realwrite.mjs` 收编进去后删除这两个文件。
-- 做法：
-  1. `scripts/bench/cases/*.json`：每个文件是一份 brief + 若干 evidence（参考 `realwrite.mjs` 里构造 brief 和 `putEvidence` 的写法）。先做 5 个：散文 docx、技术方案书 docx（≥7000 字）、答辩 PPT、海报 png、官方报名表模板。
-  2. 脚本对每个 case 用独立的临时 `dataDir` 跑 `runOrchestration`，输出一张表：是否成功、失败原因首句、每个任务用了几轮、总耗时、`model-calls.jsonl` 里的请求数和 token。结果写到 `bench-results/<日期>.json`（加入 .gitignore）。
-  3. `package.json` 加 `"bench": "npm run build && node scripts/bench.mjs"`。
-- 完成标准：`npm run bench -- --case essay` 能跑通一个 case 并打印结果表。注意它会消耗真实 API 额度，不要放进 `npm test`。
-
-### A4. 报名表类任务：缺个人信息时不要空跑 4 轮
-- 位置：`src/workflows/orchestrator.ts` 的 `fillTemplate` / `runTask`。
-- 现状（真实任务 4195d01c、b63f1dd1）：官方报名表需要身份证号、指导教师工作证号等用户资料里没有的字段。现在已改成“留空并列入《需要你提供的资料》”，但 `src/core/profile.ts` 的资料字段太少。
-- 做法：
-  1. `UserProfile` 增加：身份证号 `idNumber`、年级 `grade`、班级 `className`、QQ `qq`、指导教师电话/邮箱/院系/职称（`advisorPhone` 等）、队员列表 `members: {name, studentId, idNumber, phone, major}[]`。
-  2. `src/core/config.ts` 的 profile schema、`src/ui.ts` 的 `profileMenu` 同步加字段；`profileNote` 输出新字段。
-  3. `fields` 正则表补上对应关键词。
-- 完成标准：`test/profile.test.mjs` 补充新字段用例；UI 能编辑队员列表。
-
-### A5. 研究提示词里的社交平台查询做成可配置
-- 位置：`src/agents/prompts.ts` 的 `research` 提示词第 83–99 行（小红书/B站/知乎/贴吧 `site:` 查询）。
-- 做法：从默认提示词中移出，改为配置项 `search.socialPlatforms: boolean`（默认 false），为 true 时才拼接这一段。原因：这些站点多数需要登录，程序重新抓取会失败，白白消耗研究轮数。
-- 完成标准：`test/prompts.test.mjs` 断言默认提示词不含 `xiaohongshu`，开启后包含。
-
-### A6. PPT 版面：补充程序化检查
-- 位置：`src/artifacts/artifacts.ts` 的 `validateWork`。
-- 做法：增加检查——每页至少一个标题级文本（fontSize ≥ 28）；正文字号不小于 14；单页文本元素总字数超过 220 字报“文字过多”；文字颜色与背景色对比度（WCAG 相对亮度公式）低于 3 报错。
-- 完成标准：`test/` 新增对应用例。
+（其余额外落地的冲奖能力：数值仿真沙箱 `src/artifacts/simulation.ts`、两级评委打分卡与定向冲奖精修 `src/workflows/judge-rubric.ts`、Project Spec 单一事实源 `src/workflows/project-spec.ts`、跨赛事防撞题记忆与标杆解构、赛道可胜率前置拦截 `src/competition/winnability.ts`、可选人机协同卡点 `--interactive-gates` 及同源/轻量模型质量提醒 `modelWarnings`。）
 
 ## B. 工程清理
 

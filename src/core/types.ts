@@ -17,11 +17,19 @@ export const ResearchProof = z.object({
   quote: z.string(),
   title: z.string().default(""),
 });
+/** 往届获奖特征与评委偏好抽象简报：只提炼评审导向与饱和题材，不搬运具体作品正文。 */
+export const ResearchBenchmark = z.object({
+  winning_patterns: z.array(z.string()).default([]),
+  judge_preferences: z.array(z.string()).default([]),
+  overused_topics: z.array(z.string()).default([]),
+  differentiator_angles: z.array(z.string()).default([]),
+});
 export const ResearchCoverage = z.object({
   past_winners: z.array(ResearchProof).default([]),
   past_works: z.array(ResearchProof).default([]),
   judging: z.array(ResearchProof).default([]),
   missing: z.array(z.string()).default([]),
+  benchmark: ResearchBenchmark.optional(),
 });
 export const Brief = z.object({
   title: z.string(),

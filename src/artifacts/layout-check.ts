@@ -95,7 +95,7 @@ async function shot(file: string, page: number, out: string): Promise<boolean> {
   return true;
 }
 
-const docxRubric = `任务：排版审查。现在看到的是 Word 文档渲染后的真实页面（长文档会分页，看到的是其中一页）。只指出肉眼可见、会影响阅读的版面缺陷：Markdown 表格符号（竖线、横线）被当成普通文字显示而没有变成表格；单独成行的分隔线或代码围栏符号；星号、井号等未转换的 Markdown 标记；标题层级在字号和缩进上明显不连贯；文字溢出页面边界、元素互相重叠或在页面中间被裁掉；图片缺失、位置错乱或没有图题；同类元素样式明显不统一。
+const docxRubric = `任务：排版审查。现在看到的是 Word/PDF 文档渲染后的真实页面（长文档会分页，看到的是其中一页）。只指出肉眼可见、会影响阅读的版面缺陷：Markdown 表格符号（竖线、横线）被当成普通文字显示而没有变成表格；单独成行的分隔线或代码围栏符号；星号、井号、美元符公式或图片 Markdown 链接（![...](...)）等未转换的标记；标题层级在字号和缩进上明显不连贯；文字溢出页面边界、元素互相重叠或在页面中间被裁掉；声明了图题或图片展示区却缺失实际图像、图片位置错乱或没有图题；同类元素样式明显不统一。
 
 分页可以断在句子中间：某一页最后一行停在半句、下一页接着写是正常现象，不是缺陷，也不要据此判断内容被截断；全文文字是否完整由程序逐字比对，不需要你判断。只检查这一页上实际可见的问题：文字被裁切、重叠、异常的大片空白或空页。最后一页内容较少、下方留白是正常的。
 
@@ -125,14 +125,17 @@ export async function checkLayout(
   file: string,
   pages?: number[],
   criteria?: { criterion: number; requirement: string }[],
-  render: (file: string) => Promise<RenderedDoc> = renderers.docx,
+  render?: (file: string) => Promise<RenderedDoc>,
 ): Promise<LayoutReport> {
-  const isDocx = extname(file).toLowerCase() === ".docx";
+  const ext = extname(file).toLowerCase();
+  const isDocx = ext === ".docx";
+  const isPdf = ext === ".pdf";
+  const isDocLike = isDocx || isPdf;
   const report: LayoutReport = {
     issues: [], suggestions: [], checked: 0, totalPages: null,
     checkedPages: [], failedPages: [], complete: false,
-    textCoverage: isDocx ? "unverified" : "not_applicable",
-    textCoverageDetails: isDocx
+    textCoverage: isDocLike ? "unverified" : "not_applicable",
+    textCoverageDetails: isDocLike
       ? "尚未完成渲染页面与文档原文的文字比对"
       : "幻灯片由逐页视觉检查核验，不做Word全文比对",
   };
@@ -160,11 +163,14 @@ export async function checkLayout(
     if (requested.some((x) => !Number.isSafeInteger(x.criterion) || x.criterion < 0 || !x.requirement.trim()) ||
         new Set(requested.map((x) => x.criterion)).size !== requested.length)
       throw Error("视觉标准编号必须唯一且要求不能为空");
-    if (!isDocx) await requireOffice();
+    if (!isDocLike) await requireOffice();
     const sharp = (await import("sharp")).default;
     dir = await mkdtemp(join(tmpdir(), "layout-"));
-    // Word：页数、截图和文字都来自同一份渲染出的 PDF，不会出现统计页数与可截图页数不一致。
-    if (isDocx) rendered = await render(file);
+    // Word / PDF：页数、截图和文字都来自同一份 PDF 渲染结果，不会出现统计页数与可截图页数不一致。
+    if (isDocLike) {
+      const fn = render || (isPdf ? renderers.pdf : renderers.docx);
+      rendered = await fn(file);
+    }
     const reported = rendered ? rendered.pages : await pageCount(file);
     if (reported !== null && (!Number.isSafeInteger(reported) || reported < 1))
       throw Error("文档没有可渲染页面");
@@ -220,7 +226,7 @@ export async function checkLayout(
       }
       try {
         const jpeg = await sharp(await readFile(out)).jpeg({ quality: 85 }).toBuffer();
-        const rubric = isDocx ? docxRubric : pptxRubric;
+        const rubric = isDocLike ? docxRubric : pptxRubric;
         const criterionPrompt = requested.length
           ? `\n同时核验这些视觉标准：${JSON.stringify(requested)}。在 JSON 中增加 criteria 数组，每项含 criterion、status、evidence。status 为 passed/failed/unverified/not_applicable；只按本页实际证据判断。不适用于本页的项用 not_applicable 并说明原因，无法判断用 unverified，禁止无证据通过。每个编号恰好出现一次。`
           : "";
@@ -276,7 +282,7 @@ export async function checkLayout(
     await rendered?.dispose();
     if (dir) {
       // 清理失败不会覆盖真正的审查错误；原始文档从不删除。
-      if (!isDocx) await exec(officecli(), ["close", file], { timeout: 30_000, windowsHide: true }).catch(() => {});
+      if (!isDocLike) await exec(officecli(), ["close", file], { timeout: 30_000, windowsHide: true }).catch(() => {});
       await rm(dir, { recursive: true, force: true }).catch(() => {});
     }
   }

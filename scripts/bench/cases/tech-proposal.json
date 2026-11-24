@@ -1,0 +1,51 @@
+{
+  "id": "tech-proposal",
+  "name": "技术方案书（DOCX + 仿真 + 表格公式图）",
+  "url": "https://example.edu.cn/bench/tech-proposal",
+  "brief": {
+    "title": "2026年全国高校智能低碳技术创新与创客大赛",
+    "edition": "2026",
+    "eligibility": "全日制在校大学生",
+    "deadline": "2026-12-31",
+    "ai_rules": "允许辅助文档润色，核心方案须具备可复核参数推演与验证计划",
+    "scoring": "问题价值与创新性 30%、技术机制与量化推导深度 35%、工程可行性与成本 20%、图文呈现规范度 15%",
+    "deliverables": [
+      {
+        "type": "作品技术方案书",
+        "quantity": "1份",
+        "formats": ["docx"],
+        "limits": ["正文不少于7000字"],
+        "naming": "学校_作品名称_作者姓名.docx",
+        "attachments": [],
+        "submission": "官网上传 Word 文档",
+        "official_template": null
+      }
+    ],
+    "requires_idea": true,
+    "missing": [],
+    "citations": [
+      {
+        "field": "deliverables.0.formats",
+        "url": "https://example.edu.cn/bench/tech-proposal",
+        "quote": "参赛团队须提交作品技术方案书（docx 格式，正文不少于7000字），含架构图、核心参数计算、BOM成本表与验证方案。"
+      }
+    ],
+    "research": { "past_winners": [], "past_works": [], "judging": [], "missing": [] }
+  },
+  "evidence": [
+    {
+      "url": "https://example.edu.cn/bench/tech-proposal",
+      "title": "智能低碳技术创新大赛官方规则",
+      "kind": "official",
+      "text": "参赛团队须提交作品技术方案书（docx 格式，正文不少于7000字），含架构图、核心参数计算、BOM成本表与验证方案。排版要求：A4 页面，标题黑体，正文宋体小四、1.5倍行距。方案中严禁虚构真人实验数据，数值模型与仿真结果须标明参数前提与计算方法。"
+    }
+  ],
+  "idea": {
+    "title": "面向高校算力机房余热回收与峰谷电价协同的轻量级边缘调度系统",
+    "audience": "高校信息中心与后勤节能运维团队",
+    "problem": "中小型高校 GPU 教学机房夜间算力空转与白天峰电高负荷并存，制冷能耗占比高且缺乏低成本负荷转移机制",
+    "mechanism": "结合分时电价、批处理作业弹性截止期约束与冷热通道温升模型，采用轻量整数规划/启发式队列调度与液冷回水余热供暖联调",
+    "verification": "通过可复现 Python 24 小时电价-负荷-PUE 数值仿真与对比基线调度验证节电率与成本回收期",
+    "evidence_urls": []
+  }
+}
