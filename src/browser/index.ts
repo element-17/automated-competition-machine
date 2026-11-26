@@ -16,14 +16,21 @@ export function createGatewayBrowserAdapter(
   options: { agent?: AgentName; preferVision?: boolean } = {},
 ): BrowserModelAdapter {
   const agent = options.agent ?? "reviewer";
-  const supportsVision = Boolean(
+  let visionEnabled = Boolean(
     (options.preferVision ?? true) && gateway.inspectImage,
   );
   return {
-    supportsVision,
+    get supportsVision() {
+      return visionEnabled;
+    },
     async decide(prompt, screenshot) {
-      if (screenshot && supportsVision && gateway.inspectImage) {
-        return gateway.inspectImage(prompt, screenshot, agent);
+      if (screenshot && visionEnabled && gateway.inspectImage) {
+        try {
+          return await gateway.inspectImage(prompt, screenshot, agent);
+        } catch {
+          // 视觉接口不受支持或中转站拒绝大图时，自动降级为纯文本 @eN DOM 决策。
+          visionEnabled = false;
+        }
       }
       return gateway.generate("reviewer", prompt, agent);
     },

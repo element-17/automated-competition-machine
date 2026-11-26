@@ -63,16 +63,27 @@ export function detectSubmissionTargets(
     });
   }
 
-  // 2. 若规则档案未提取出邮箱，在原始证据的“投稿/提交/邮箱”上下文中补充查找
+  // 2. 若规则档案未提取出邮箱，仅在官方入口/审核页/附件等可信证据的“投稿/提交/邮箱”上下文中补充查找，避免混入无关搜索页邮箱
+  const TRUSTED_EVIDENCE_KINDS = new Set([
+    "entry",
+    "queue_review",
+    "queue_review_link",
+    "linked",
+    "attachment",
+  ]);
+  const IGNORE_EMAIL_RE =
+    /^(?:noreply|no-reply|kefu|jubao|complaint|abuse|postmaster|webmaster|news@thepaper\.cn)/i;
   if (!found.some((x) => x.channel === "email")) {
     for (const ev of evidence) {
+      if (!TRUSTED_EVIDENCE_KINDS.has(ev.kind)) continue;
       const snippets = ev.text.match(/.{0,35}(?:投稿|提交|报送|发至|发送至|邮箱).{0,80}/g) || [];
       for (const s of snippets) {
         for (const email of s.match(EMAIL_RE) || []) {
+          if (IGNORE_EMAIL_RE.test(email)) continue;
           push({
             channel: "email",
             target: email,
-            reason: `来自证据页《${ev.title.slice(0, 40)}》`,
+            reason: `来自官方证据页《${ev.title.slice(0, 40)}》`,
             subjectHint,
           });
         }
@@ -92,7 +103,19 @@ export function detectSubmissionTargets(
   return found;
 }
 
-/** 自动解析某次任务的可提交交付文件（优先 final/ 目录及最终提交包 ZIP）。 */
+function walkFiles(dir: string): string[] {
+  const out: string[] = [];
+  if (!existsSync(dir)) return out;
+  for (const name of readdirSync(dir)) {
+    const full = join(dir, name);
+    const st = statSync(full);
+    if (st.isDirectory()) out.push(...walkFiles(full));
+    else if (st.isFile()) out.push(full);
+  }
+  return out;
+}
+
+/** 自动解析某次任务的可提交交付文件（优先递归收集 final/ 成品，不混入中间草稿）。 */
 export function resolveJobDeliverableFiles(
   jobDir: string,
   recordedOutputs: string[] = [],
@@ -102,29 +125,36 @@ export function resolveJobDeliverableFiles(
   let bundleZipPath: string | undefined;
 
   if (existsSync(finalDir)) {
-    for (const name of readdirSync(finalDir)) {
-      const full = join(finalDir, name);
-      if (statSync(full).isFile()) files.push(full);
+    for (const full of walkFiles(finalDir)) {
+      const base = basename(full);
+      if (base.endsWith(".zip") && /提交包|bundle|submission/i.test(base)) {
+        bundleZipPath = bundleZipPath || full;
+      } else {
+        files.push(full);
+      }
     }
   }
 
-  for (const out of recordedOutputs) {
-    if (!existsSync(out) || !statSync(out).isFile()) continue;
-    const base = basename(out);
-    if (base.endsWith(".zip") && /提交包|bundle|submission/i.test(base)) {
-      bundleZipPath = bundleZipPath || out;
-      continue;
-    }
-    if (
-      !files.includes(out) &&
-      !base.endsWith(".json") &&
-      !/需要你提供的资料\.md$/i.test(base)
-    ) {
-      files.push(out);
+  // 仅当 final/ 目录没有成品时，才从 outputs 回退挑选非中间草稿文件
+  if (!files.length) {
+    for (const out of recordedOutputs) {
+      if (!existsSync(out) || !statSync(out).isFile()) continue;
+      const base = basename(out);
+      if (base.endsWith(".zip") && /提交包|bundle|submission/i.test(base)) {
+        bundleZipPath = bundleZipPath || out;
+        continue;
+      }
+      if (
+        !files.includes(out) &&
+        !base.endsWith(".json") &&
+        !/^(?:review-draft|supporting-work|需要你提供的资料)/i.test(base)
+      ) {
+        files.push(out);
+      }
     }
   }
 
-  // 若未在 outputs 中找到打包 ZIP，则在 jobDir 根目录检查常见提交包命名
+  // 若未找到打包 ZIP，则在 jobDir 根目录检查常见提交包命名
   if (!bundleZipPath && existsSync(jobDir)) {
     for (const name of readdirSync(jobDir)) {
       if (name.endsWith(".zip") && /提交包|final|submission/i.test(name)) {
@@ -152,8 +182,11 @@ export function draftSubmissionEmail(input: {
   subjectHint?: string;
 }): { subject: string; body: string } {
   const p = input.profile || {};
-  const str = (k: string) =>
-    typeof p[k] === "string" ? (p[k] as string).trim() : "";
+  const EMPTY_PLACEHOLDER_RE = /^(?:无|暂无|没有|none|null|n\/a|-+|未填写)$/i;
+  const str = (k: string) => {
+    const v = typeof p[k] === "string" ? (p[k] as string).trim() : "";
+    return EMPTY_PLACEHOLDER_RE.test(v) ? "" : v;
+  };
   const school = str("school");
   const name = str("name");
   const team = str("teamName");

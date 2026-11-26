@@ -205,15 +205,19 @@ export async function runBrowserAgent(
         step,
         url: snap.url,
         title: snap.title,
-        action: { action: "wait", ms: 500, thought: `模型决策解析失败：${msg}` },
+        action: { action: "wait", ms: 500, thought: `模型决策失败：${msg}` },
         ok: false,
         note: msg,
         timestamp: new Date().toISOString(),
       });
-      if (step === maxSteps) {
+      // 上游模型/网络/鉴权/预算错误属于不可恢复故障，立即停止避免多步空转重试。
+      if (
+        /调用失败|HTTP [45]\d\d|API_KEY|预算|超时|timeout|aborted/i.test(msg) ||
+        step === maxSteps
+      ) {
         return {
           status: "failed",
-          summary: `浏览器代理决策解析失败：${msg}`,
+          summary: `浏览器代理决策失败：${msg}`,
           finalUrl: snap.url,
           downloads,
           visitedUrls: [...visitedUrls],

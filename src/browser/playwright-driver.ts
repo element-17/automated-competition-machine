@@ -296,8 +296,8 @@ class PlaywrightBrowserSession implements BrowserSession {
 
     let screenshot: { data: Buffer; mime: string } | undefined;
     if (options.withScreenshot) {
-      const buf = await this.page.screenshot({ type: "png" });
-      screenshot = { data: buf, mime: "image/png" };
+      const buf = await this.page.screenshot({ type: "jpeg", quality: 65 });
+      screenshot = { data: buf, mime: "image/jpeg" };
       if (options.annotateMarks) {
         await this.page
           .evaluate(() => document.getElementById("__acm_som_layer")?.remove())

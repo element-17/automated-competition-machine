@@ -152,6 +152,8 @@ program
         maxSteps: opts.maxSteps ?? bCfg.maxSteps,
         useVision: opts.vision === false ? false : bCfg.useVision,
         headless: bCfg.headless,
+        onStep: (step, note) =>
+          console.error(`[browser-agent] 第 ${step} 步：${note}`),
       });
       print(res);
       if (res.status === "failed") process.exitCode = 1;

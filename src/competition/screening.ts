@@ -5,6 +5,7 @@ import { leaseOwner, trackLeaseOnExit } from "../core/store.js";
 import type { ModelGateway } from "../core/types.js";
 import type { AppConfig } from "../core/config.js";
 import { fetchDocument, saveSource } from "./sources.js";
+import type { BrowserFetchOptions } from "./browser-fetcher.js";
 import { parseJSON } from "../core/gateway.js";
 import { modelLabel } from "../agents/models.js";
 import { guards } from "../agents/prompts.js";
@@ -40,9 +41,21 @@ export async function screenOne(
   gateway: ModelGateway,
   item: Entry,
 ) {
+  const browserCfg = (cfg as any).browser as
+    | { enabled?: boolean; autoFallback?: boolean; headless?: boolean }
+    | undefined;
+  const browserFallback: BrowserFetchOptions | undefined =
+    process.env.COMPETE_DISABLE_BROWSER !== "1" &&
+    browserCfg?.enabled &&
+    browserCfg?.autoFallback !== false
+      ? {
+          dataDir: cfg.dataDir,
+          headless: browserCfg.headless ?? true,
+        }
+      : undefined;
   let page;
   try {
-    page = await fetchDocument(item.url);
+    page = await fetchDocument(item.url, { browserFallback });
   } catch (e) {
     store.sourceAttempt(
       item.competitionId,
@@ -75,6 +88,7 @@ export async function screenOne(
         x.url,
         "queue_review_link",
         x.title,
+        { browserFallback },
       ).catch(() => null),
     ),
   );
@@ -121,7 +135,7 @@ export async function screenOne(
     if (
       !deadline ||
       !dateMatches ||
-      !/报名|投稿|截稿|作品.{0,5}(?:提交|征集)|提交.{0,5}作品|(?:提交|征集).{0,5}截止|征文.{0,6}止/.test(quoteText) ||
+      !/报名|投稿|截稿|作品.{0,6}(?:提交|征集|截止)|提交.{0,5}作品|(?:提交|征集).{0,5}截止|征文.{0,6}止/.test(quoteText) ||
       /开始前|尚未开放|未开放报名/.test(verdict.reason)
     ) {
       verdict.decision = "needs_review";

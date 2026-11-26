@@ -74,9 +74,11 @@ test("EmailDeliveryChannel 支持演练生成 .eml 预览、SMTP 正式发送与
     const drafted = draftSubmissionEmail({
       competitionTitle: "2026 创新挑战赛",
       files: resolved.files,
-      profile: { school: "示例大学", name: "张三", phone: "13800000000" },
+      profile: { school: "示例大学", teamName: "无", advisor: "无", name: "张三", phone: "13800000000" },
     });
     assert.match(drafted.subject, /示例大学-张三/);
+    assert.doesNotMatch(drafted.subject, /-无/);
+    assert.doesNotMatch(drafted.body, /指导教师：无/);
     assert.match(drafted.body, /方案正文\.txt/);
 
     // 1. 演练模式：生成真实 .eml 文件，不发信

@@ -39,7 +39,7 @@ const ATTACHMENT_LINK_RE =
 /** 判断静态 HTTP 抓取失败是否适合切换内置无头浏览器重试。 */
 export function shouldUseBrowserFallback(error: unknown): boolean {
   const msg = error instanceof Error ? error.message : String(error);
-  return /网页没有可提取的正文|可能需要浏览器|来源不可访问 \((?:401|403|406|412|418|429|520|521)\)|暂不支持此来源类型：unknown/i.test(
+  return /网页没有可提取的正文|可能需要浏览器|来源不可访问 \((?:401|403|406|412|418|429|520|521)\)|暂不支持此来源类型：unknown|fetch failed|ECONNRESET|CERT_|UNABLE_TO_VERIFY_LEAF_SIGNATURE/i.test(
     msg,
   );
 }
