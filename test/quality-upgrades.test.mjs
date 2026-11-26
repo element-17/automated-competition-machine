@@ -41,8 +41,14 @@ import {
   profileNote,
 } from "../dist/core/profile.js";
 import { Store } from "../dist/core/store.js";
+import { cleanSearchTitle } from "../dist/workflows/formats.js";
 import { detectAiCliches } from "../dist/workflows/judge-rubric.js";
-import { Plan, planProblems, runOrchestration } from "../dist/workflows/orchestrator.js";
+import {
+  Plan,
+  planProblems,
+  runOrchestration,
+  selectActiveDeliverables,
+} from "../dist/workflows/orchestrator.js";
 
 const exec = promisify(execFile);
 
@@ -551,4 +557,81 @@ test("固定样本评测脚本 --dry-run 可离线校验全部 5 份标杆样本
   assert.match(stdout, /pitch-deck/);
   assert.match(stdout, /poster/);
   assert.match(stdout, /registration-form/);
+});
+
+test("多赛道/条件交付物筛选与 PPT 格式别名：保留主赛道，不静默丢弃单交付物视频赛", () => {
+  const mkItem = (type, formats, limits = []) => ({
+    type,
+    quantity: "1",
+    formats,
+    limits,
+    naming: null,
+    attachments: [],
+    submission: null,
+    official_template: null,
+  });
+  const mkBrief = (deliverables) => ({
+    title: "测试赛",
+    edition: null,
+    eligibility: null,
+    deadline: null,
+    ai_rules: null,
+    scoring: null,
+    deliverables,
+    requires_idea: true,
+    missing: [],
+    citations: [],
+    research: { past_winners: [], past_works: [], judging: [], missing: [] },
+  });
+
+  // 1. CAAI 多赛道：主体赛事 PPT + 揭榜挂帅（含视频演示）→ 聚焦主体赛事 PPT
+  const caai = selectActiveDeliverables(
+    mkBrief([
+      mkItem("参赛项目内容PPT（主体赛事）", ["PPT"]),
+      mkItem("技术方案报告（揭榜挂帅专项赛）", ["Word", "PDF"]),
+      mkItem("视频演示（揭榜挂帅专项赛终审）", []),
+    ]),
+  );
+  assert.equal(caai.brief.deliverables.length, 1);
+  assert.equal(caai.brief.deliverables[0].type, "参赛项目内容PPT（主体赛事）");
+  assert.ok(caai.skipped.length >= 2);
+  // PPT 别名应能匹配 slides/pptx 规划
+  const pptPlan = Plan.parse({
+    tasks: [
+      {
+        id: "deck",
+        deliverable: 0,
+        title: "项目路演PPT",
+        kind: "slides",
+        format: "pptx",
+        instructions: "制作答辩PPT",
+        acceptance: ["内容完整"],
+        acceptanceChecks: [{ criterion: 0, checks: ["content"] }],
+      },
+    ],
+  });
+  assert.deepEqual(planProblems(pptPlan, caai.brief, false), []);
+
+  // 2. 三创赛条件交付物：剔除非首次参赛和减员申请表，保留主项目报告书
+  const sanchuang = selectActiveDeliverables(
+    mkBrief([
+      mkItem("《项目报告书》（参赛作品）", ["pdf"]),
+      mkItem("非首次参赛项目：原作品", [], ["仅非首次参赛项目需提交"]),
+      mkItem("《团队减员申请表》（仅申请成员减员时）", []),
+    ]),
+  );
+  assert.equal(sanchuang.brief.deliverables.length, 1);
+  assert.equal(sanchuang.brief.deliverables[0].type, "《项目报告书》（参赛作品）");
+
+  // 3. 单交付物视频赛绝不静默丢弃
+  const videoOnly = selectActiveDeliverables(mkBrief([mkItem("宣传视频", ["mp4"])]));
+  assert.equal(videoOnly.brief.deliverables.length, 1);
+  assert.equal(videoOnly.skipped.length, 0);
+
+  // 4. 列表页脏标题清洗
+  assert.equal(
+    cleanSearchTitle("2026.11.06 【竞赛通知-2026062】第十七届全国大学生电子商务“创新、创意及创业”挑战赛 一、参赛对象及要求 （一）全日制在校大学生"),
+    "第十七届全国大学生电子商务“创新、创意及创业”挑战赛",
+  );
+  assert.equal(cleanSearchTitle("华灿奖"), "华灿奖");
 });

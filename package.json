@@ -32,6 +32,7 @@
     "langsmith": "^0.11.8",
     "lodash": "^4.17.21",
     "mammoth": "^1.10.0",
+    "nodemailer": "^10.6.1",
     "pdfjs-dist": "^5.4.624",
     "pdfkit": "^0.17.2",
     "picocolors": "^1.1.1",
@@ -44,6 +45,7 @@
   "devDependencies": {
     "@langchain/langgraph-cli": "^1.6.0",
     "@types/node": "^24.0.0",
+    "@types/nodemailer": "^8.0.2",
     "@types/pdfkit": "^0.17.4",
     "typescript": "^5.8.0"
   }

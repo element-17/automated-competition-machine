@@ -212,21 +212,34 @@ export function renderChartSvg(rawSpec: ChartSpec): string {
         });
       }
     } else {
-      spec.series.forEach((s, si) => {
-        const color = normColor(s.color, si);
-        const pts = s.values.map((v, i) => ({
+      const allPts = spec.series.map((s) =>
+        s.values.map((v, i) => ({
           x: plotLeft + (n === 1 ? plotW / 2 : (i + 0.5) * groupW),
           y: yOf(v),
           v,
-        }));
+        })),
+      );
+      spec.series.forEach((s, si) => {
+        const color = normColor(s.color, si);
+        const pts = allPts[si]!;
         const d = pts.map((p, idx) => `${idx === 0 ? "M" : "L"}${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(" ");
         parts.push(`<path d="${d}" fill="none" stroke="${color}" stroke-width="2.8" stroke-linejoin="round" stroke-linecap="round"/>`);
-        for (const p of pts) {
+        pts.forEach((p, idx) => {
+          // 若同 X 处存在更靠上（SVG y 更小）且距离过近的系列点，则把本点数值标签放到圆点下方，避免文字重叠。
+          const crowdedAbove = allPts.some(
+            (other, oi) =>
+              oi !== si &&
+              other[idx] &&
+              other[idx]!.y <= p.y &&
+              p.y - other[idx]!.y < 20 &&
+              (other[idx]!.y < p.y || oi < si),
+          );
+          const labelY = crowdedAbove ? p.y + 18 : p.y - 9;
           parts.push(
             `<circle cx="${p.x.toFixed(1)}" cy="${p.y.toFixed(1)}" r="4.5" fill="#FFFFFF" stroke="${color}" stroke-width="2.5"/>`,
-            `<text x="${p.x.toFixed(1)}" y="${(p.y - 9).toFixed(1)}" text-anchor="middle" font-family="${FONT}" font-size="11" font-weight="600" fill="${color}">${esc(fmtNum(p.v) + unit)}</text>`,
+            `<text x="${p.x.toFixed(1)}" y="${labelY.toFixed(1)}" text-anchor="middle" font-family="${FONT}" font-size="11" font-weight="600" fill="${color}">${esc(fmtNum(p.v) + unit)}</text>`,
           );
-        }
+        });
       });
     }
   } else if (spec.type === "horizontal-bar") {
@@ -583,7 +596,15 @@ export function renderMermaidSvg(code: string, title?: string): string {
     (layers[l] ||= []).push(node);
   }
 
-  const nodeW = 190, nodeH = 58, gapX = 56, gapY = 66;
+  const maxLabelUnits = Math.max(8, ...[...nodes.values()].map((n) => charUnits(n.label)));
+  const nodeW = Math.min(280, Math.max(210, Math.round(maxLabelUnits * 16 + 38)));
+  const maxEdgeLabelW = edges.reduce(
+    (mx, e) => (e.label ? Math.max(mx, Math.round(charUnits(e.label) * 13 + 20)) : mx),
+    0,
+  );
+  const nodeH = 68;
+  const gapX = horizontal ? Math.max(56, maxEdgeLabelW + 28) : 52;
+  const gapY = horizontal ? 48 : Math.max(50, maxEdgeLabelW ? 68 : 50);
   const maxPerLayer = Math.max(...layers.map((l) => l.length));
   const titleOffset = title ? 44 : 0;
   const pad = 44;
@@ -636,12 +657,13 @@ export function renderMermaidSvg(code: string, title?: string): string {
   }
   for (const [name, b] of groupBoxes) {
     parts.push(
-      `<rect x="${b.x1}" y="${b.y1}" width="${b.x2 - b.x1}" height="${b.y2 - b.y1}" rx="10" fill="#F8FAFC" stroke="#AED6F1" stroke-width="1.5" stroke-dasharray="6 4"/>`,
-      `<text x="${b.x1 + 10}" y="${b.y1 + 17}" font-family="${FONT}" font-size="12" font-weight="700" fill="#1B4F72">${esc(name)}</text>`,
+      `<rect x="${b.x1}" y="${b.y1}" width="${b.x2 - b.x1}" height="${b.y2 - b.y1}" rx="10" fill="#F8FAFC" stroke="#AED6F1" stroke-width="1.6" stroke-dasharray="6 4"/>`,
+      `<text x="${b.x1 + 12}" y="${b.y1 + 19}" font-family="${FONT}" font-size="15" font-weight="700" fill="#1B4F72">${esc(name)}</text>`,
     );
   }
 
-  // 边
+  // 边（连线先画，边标签放到节点之后绘制避免被节点盖住）
+  const edgeLabelParts: string[] = [];
   for (const e of edges) {
     const a = coords.get(e.from), b = coords.get(e.to);
     if (!a || !b) continue;
@@ -663,10 +685,10 @@ export function renderMermaidSvg(code: string, title?: string): string {
       `<path d="${path}" fill="none" stroke="#2E86C1" stroke-width="2" ${e.dashed ? 'stroke-dasharray="6 4"' : ""} marker-end="url(#mm-arrow)"/>`,
     );
     if (e.label) {
-      const lw = Math.max(36, Math.round(charUnits(e.label) * 11 + 14));
-      parts.push(
-        `<rect x="${mx - lw / 2}" y="${my - 10}" width="${lw}" height="20" rx="4" fill="#FFFFFF" stroke="#D6EAF8" stroke-width="1"/>`,
-        `<text x="${mx}" y="${my + 4}" text-anchor="middle" font-family="${FONT}" font-size="11" fill="#1B4F72">${esc(e.label)}</text>`,
+      const lw = Math.max(44, Math.round(charUnits(e.label) * 13 + 18));
+      edgeLabelParts.push(
+        `<rect x="${mx - lw / 2}" y="${my - 13}" width="${lw}" height="26" rx="5" fill="#FFFFFF" stroke="#AED6F1" stroke-width="1.2"/>`,
+        `<text x="${mx}" y="${my + 5}" text-anchor="middle" font-family="${FONT}" font-size="13" font-weight="600" fill="#1B4F72">${esc(e.label)}</text>`,
       );
     }
   }
@@ -687,13 +709,14 @@ export function renderMermaidSvg(code: string, title?: string): string {
       parts.push(`<rect x="${c.x}" y="${c.y}" width="${c.w}" height="${c.h}" rx="${rx}" fill="${fill}" stroke="${stroke}" stroke-width="1.8"/>`);
     }
     const lines = wrapText(node.label, 12).slice(0, 2);
-    const startY = cy - ((lines.length - 1) * 16) / 2 + 5;
+    const startY = cy - ((lines.length - 1) * 21) / 2 + 6;
     lines.forEach((ln, li) =>
       parts.push(
-        `<text x="${cx}" y="${startY + li * 16}" text-anchor="middle" font-family="${FONT}" font-size="13" font-weight="600" fill="${textFill}">${esc(ln)}</text>`,
+        `<text x="${cx}" y="${startY + li * 21}" text-anchor="middle" font-family="${FONT}" font-size="17" font-weight="700" fill="${textFill}">${esc(ln)}</text>`,
       ),
     );
   }
+  parts.push(...edgeLabelParts);
   return `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">${parts.join("")}</svg>`;
 }
 
@@ -702,7 +725,7 @@ export async function renderMermaidPng(
   title?: string,
 ): Promise<{ data: Buffer; width: number; height: number }> {
   const svg = renderMermaidSvg(code, title);
-  const data = await sharp(Buffer.from(svg), { density: 180 }).png().toBuffer();
+  const data = await sharp(Buffer.from(svg), { density: 240 }).png().toBuffer();
   const meta = await sharp(data).metadata();
   return { data, width: meta.width || 800, height: meta.height || 400 };
 }

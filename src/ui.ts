@@ -72,6 +72,7 @@ import {
 import { fetchDocument, normalizeUrl } from "./competition/sources.js";
 import { processQueue } from "./competition/queue.js";
 import { screenQueue } from "./competition/screening.js";
+import { browserMenu, deliveryMenu } from "./ui-browser-delivery.js";
 
 type Entry = {
   competitionId: string;
@@ -2569,6 +2570,16 @@ export async function startUI(configPath?: string) {
           { value: "recheck", label: "重新审核一场赛事" },
           { value: "manual", label: "人工审核队列", hint: "待人工确认的赛事；通过进入处理队列，无效丢弃" },
           { value: "work", label: "处理队列", hint: "审核后逐场研究并制作" },
+          {
+            value: "browser",
+            label: "内置浏览器工具",
+            hint: "登录态保存、动态官网抓附件、后台 Computer-Use 交互",
+          },
+          {
+            value: "deliver",
+            label: "作品交付中心",
+            hint: "邮箱 SMTP 交付、浏览器自动填表上传、回执记录",
+          },
           { value: "retry", label: "重试失败赛事" },
           {
             value: "search",
@@ -2609,6 +2620,10 @@ export async function startUI(configPath?: string) {
         else if (choice === "recheck") await recheck(cfg, store);
         else if (choice === "manual") await manual(store);
         else if (choice === "work") await work(cfg, store);
+        else if (choice === "browser")
+          cfg = await browserMenu(cfg, store, configPath);
+        else if (choice === "deliver")
+          cfg = await deliveryMenu(cfg, store, configPath);
         else if (choice === "retry") await retry(store);
         else if (choice === "search")
           cfg = await searchMenu(cfg, store, configPath);

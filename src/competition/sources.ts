@@ -6,6 +6,11 @@ import { randomUUID } from "node:crypto";
 import { setTimeout as wait } from "node:timers/promises";
 import type { Evidence, ModelGateway, SearchOptions } from "../core/types.js";
 import type { Store } from "../core/store.js";
+import {
+  fetchDocumentWithBrowser,
+  shouldUseBrowserFallback,
+  type BrowserFetchOptions,
+} from "./browser-fetcher.js";
 async function pdfText(bytes: Buffer): Promise<string> {
   const pdfjs = await import("pdfjs-dist/legacy/build/pdf.mjs");
   const task = pdfjs.getDocument({
@@ -36,7 +41,10 @@ export function normalizeUrl(input: string): string {
 export const MAX_SOURCE_BYTES = 15_000_000;
 const DOWNLOAD_TIMEOUT_MS = 30_000;
 const DOWNLOAD_ATTEMPTS = 3;
-type SourceOptions = { signal?: AbortSignal };
+type SourceOptions = {
+  signal?: AbortSignal;
+  browserFallback?: BrowserFetchOptions;
+};
 type SourceFormat = "pdf" | "docx" | "pptx" | "text";
 class DownloadError extends Error {
   constructor(message: string, readonly retryable = false) {
@@ -126,6 +134,32 @@ export async function fetchDocument(input: string, options: SourceOptions = {}):
 }> {
   options.signal?.throwIfAborted();
   const url = normalizeUrl(input);
+  try {
+    return await fetchDocumentHttp(url, options);
+  } catch (e) {
+    if (
+      options.browserFallback &&
+      !isJobControlError(e) &&
+      !options.signal?.aborted &&
+      shouldUseBrowserFallback(e)
+    ) {
+      const rendered = await fetchDocumentWithBrowser(url, options.browserFallback);
+      return {
+        url: rendered.url,
+        title: rendered.title,
+        text: rendered.text,
+        links: rendered.links,
+      };
+    }
+    throw e;
+  }
+}
+async function fetchDocumentHttp(url: string, options: SourceOptions = {}): Promise<{
+  url: string;
+  title: string;
+  text: string;
+  links: { url: string; title: string }[];
+}> {
   const timeout = AbortSignal.timeout(DOWNLOAD_TIMEOUT_MS);
   const signal = options.signal ? AbortSignal.any([options.signal, timeout]) : timeout;
   const { bytes, contentType, finalUrl, format } = await download(url, signal);

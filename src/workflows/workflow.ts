@@ -1,4 +1,5 @@
 import { Guard, budgetError } from "./shared.js";
+import { cleanSearchTitle } from "./formats.js";
 import {
   assertJobCanRun,
   beginJobRun,
@@ -24,6 +25,11 @@ import {
   saveSourceBestEffort,
   searchLogged,
 } from "../competition/sources.js";
+import {
+  fetchDocumentWithBrowser,
+  ingestDownloadedAttachments,
+  type BrowserFetchOptions,
+} from "../competition/browser-fetcher.js";
 
 const State = Annotation.Root({
   jobId: Annotation<string>,
@@ -65,8 +71,26 @@ export function researchGraph(
   const builder = new StateGraph(State)
     .addNode("collect", async (s: S) => {
       const c = store.competition(s.competitionId);
+      const browserCfg = (cfg as any).browser as
+        | { enabled?: boolean; autoFallback?: boolean; downloadAttachments?: boolean; headless?: boolean }
+        | undefined;
+      const browserFallback: BrowserFetchOptions | undefined =
+        process.env.COMPETE_DISABLE_BROWSER !== "1" &&
+        browserCfg?.enabled &&
+        browserCfg?.autoFallback !== false
+          ? {
+              dataDir: cfg.dataDir,
+              headless: browserCfg.headless ?? true,
+              downloadDir: join(cfg.dataDir, "attachments", s.competitionId),
+              downloadAttachments: browserCfg.downloadAttachments !== false,
+            }
+          : undefined;
+      let entryViaHttpOk = false;
       try {
-        await saveSource(store, s.competitionId, c.url, "entry");
+        await saveSource(store, s.competitionId, c.url, "entry", undefined, {
+          browserFallback,
+        });
+        entryViaHttpOk = true;
       } catch (e) {
         store.sourceAttempt(
           s.competitionId,
@@ -74,6 +98,32 @@ export function researchGraph(
           "entry",
           e instanceof Error ? e.message : String(e),
         );
+      }
+      // 启用内置浏览器附件抓取时，用无头浏览器补抓入口页的动态下载按钮与附件。
+      if (browserFallback?.downloadAttachments) {
+        try {
+          const rendered = await fetchDocumentWithBrowser(c.url, browserFallback);
+          if (!entryViaHttpOk) {
+            store.putEvidence({
+              id: randomUUID(),
+              competitionId: s.competitionId,
+              url: rendered.url,
+              title: rendered.title,
+              text: rendered.text,
+              fetchedAt: new Date().toISOString(),
+              kind: "entry",
+            });
+          }
+          if (rendered.downloads.length) {
+            await ingestDownloadedAttachments(
+              store,
+              s.competitionId,
+              rendered.downloads,
+            );
+          }
+        } catch {
+          /* 浏览器附件补抓失败不阻断常规搜索与规则分析 */
+        }
       }
       const queries = [
         `${c.title} 比赛 通知 规程 参赛要求`,
@@ -143,10 +193,11 @@ export function researchGraph(
         ),
       );
       // 追查公开的往届一等奖/优秀作品展示、高校报道、开源代码与评分细则，不再空耗在电商平台。
+      const searchTitle = cleanSearchTitle(c.title);
       const showcaseQueries = [
-        `${c.title} 往届 一等奖 作品 展示`,
-        `${c.title} 获奖作品 源码 OR 论文 OR 答辩`,
-        `${c.title} 评分标准 评审细则`,
+        `${searchTitle} 往届 一等奖 作品 展示`,
+        `${searchTitle} 获奖作品 源码 OR 论文 OR 答辩`,
+        `${searchTitle} 评分标准 评审细则`,
       ];
       for (const q of showcaseQueries)
         if (!used.has(q)) {
@@ -318,7 +369,7 @@ export function researchGraph(
           kind: e.kind,
           text: e.text.slice(0, 18000),
         }));
-      const prompt = `${Guard}\n读取来源并只输出一个 JSON 对象，字段必须为 title, edition, eligibility, deadline, ai_rules, scoring, deliverables, requires_idea, missing, citations, research。未知值用 null，不要猜测；冲突与未知记在 missing。deliverables 是数组，每项包含 type, quantity, formats(数组), limits(数组), naming, attachments(数组), submission, official_template；没有明确规定的项用 null 或空数组；不要制定模板。deliverables 只收录需要产出提交文件的参赛作品（论文、方案、设计、译文等）；线上报名、问卷填报、注册缴费这类流程性事项不是交付物，不要列入，也不要把“报名信息表”当成交付物。citations 为数组，每项包含 field、url、quote，其中 quote 必须逐字摘自该 url 的来源正文；每项已知规则尽量提供引用。research 必须为 {past_winners:[],past_works:[],judging:[],missing:[],benchmark:{winning_patterns:[],judge_preferences:[],overused_topics:[],differentiator_angles:[]}}，前三项为 {url,quote,title} 数组；仅当找到真实获奖名单时填 past_winners，仅找到实际公开作品、代码或展示时填 past_works，仅有奖项或标题不足以证明完整作品；评分依据填 judging。benchmark 仅基于实际抓取的评分细则和往届线索提炼抽象的评委偏好、高分结构特征、常见扎堆/饱和题材与差异化切入角度（不抄袭具体项目正文，没有依据的数组留空）。quote 必须逐字来自该 URL 正文；未找到就留空，不要猜测。requires_idea 对翻译等给定材料的任务为 false，不确定为 null。赛事：${c.title}\n用户情况：${JSON.stringify(cfg.profile)}\n来源：${JSON.stringify(sources)}`;
+      const prompt = `${Guard}\n读取来源并只输出一个 JSON 对象，字段必须为 title, edition, eligibility, deadline, ai_rules, scoring, deliverables, requires_idea, missing, citations, research。未知值用 null，不要猜测；冲突与未知记在 missing。deliverables 是数组，每项包含 type, quantity, formats(数组), limits(数组), naming, attachments(数组), submission, official_template；没有明确规定的项用 null 或空数组；不要制定模板。deliverables 只收录需要产出提交文件的参赛作品（论文、方案、设计、译文等）；线上报名、问卷填报、注册缴费这类流程性事项不是交付物，不要列入，也不要把“报名信息表”当成交付物。若赛事包含多个互斥赛道/组别（如“主体赛事 vs 揭榜挂帅专项赛”“图片类 vs 视频类”“小说 vs 散文”），只选取唯一一个最适合参赛者且可用文档/PPT/图片/软件完整交付的赛道收录其初赛必需交付物（避开纯视频/音频/实物/手写赛道，并在 missing 中注明已选赛道）；不要收录仅在特殊例外条件下才提交的文件（如“仅非首次参赛项目”“仅申请减员/退赛/申诉时”）。citations 为数组，每项包含 field、url、quote，其中 quote 必须逐字摘自该 url 的来源正文；每项已知规则尽量提供引用。research 必须为 {past_winners:[],past_works:[],judging:[],missing:[],benchmark:{winning_patterns:[],judge_preferences:[],overused_topics:[],differentiator_angles:[]}}，前三项为 {url,quote,title} 数组；仅当找到真实获奖名单时填 past_winners，仅找到实际公开作品、代码或展示时填 past_works，仅有奖项或标题不足以证明完整作品；评分依据填 judging。benchmark 仅基于实际抓取的评分细则和往届线索提炼抽象的评委偏好、高分结构特征、常见扎堆/饱和题材与差异化切入角度（不抄袭具体项目正文，没有依据的数组留空）。quote 必须逐字来自该 URL 正文；未找到就留空，不要猜测。requires_idea 对翻译等给定材料的任务为 false，不确定为 null。赛事：${c.title}\n用户情况：${JSON.stringify(cfg.profile)}\n来源：${JSON.stringify(sources)}`;
       let candidate = parseJSON(
         await gateway.generate("writer", prompt, "research"),
       );

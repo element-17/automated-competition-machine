@@ -60,7 +60,7 @@ import {
   inspectSoftware,
   softwareArtifactDigest,
 } from "../artifacts/browser-checks.js";
-import { VisualBrief, makeVisual } from "../artifacts/visual.js";
+import { VisualBrief, makeVisual, parseImageSpec } from "../artifacts/visual.js";
 import {
   compareTemplate,
   downloadTemplate,
@@ -237,10 +237,121 @@ const normFormat = (x: string) => {
 /** 只识别明确写出的格式；公告未给格式时，不把规划器的选择当作官方要求。 */
 const formatAliases: Record<string, string> = {
   word: "docx",
+  doc: "docx",
   powerpoint: "pptx",
+  ppt: "pptx",
+  excel: "xlsx",
+  xls: "xlsx",
   jpeg: "jpg",
   markdown: "md",
 };
+
+const conditionalDeliverableRe =
+  /仅(?:限)?非首次参赛|非首次参赛项目|仅申请(?:成员)?减员|减员申请表|退赛申请|申诉材料|复议申请/i;
+const unsupportedMediaDeliverableRe =
+  /视频演示|演示视频|短视频|微视频|宣传视频|视频作品|视频类|\bmp4\b|\bmov\b|\bavi\b|音频作品|\bmp3\b|\bwav\b/i;
+
+function deliverableTrackTag(d: Brief["deliverables"][number]): string | null {
+  const m = /[（(]([^()（）]{2,20}(?:赛道|专项赛|主体赛事|图片类|视频类|平面类|常规赛|实战赛)[^()（）]{0,12})[）)]/.exec(
+    d.type,
+  );
+  if (m) return m[1]!.replace(/(?:初赛|复赛|终审|决赛)$/, "").trim();
+  if (/主体赛事/.test(d.type)) return "主体赛事";
+  if (/揭榜挂帅/.test(d.type)) return "揭榜挂帅专项赛";
+  if (/图片类/.test(d.type)) return "图片类";
+  if (/视频类/.test(d.type)) return "视频类";
+  return null;
+}
+
+/**
+ * 多赛道/条件交付物筛选：
+ * - 单一交付物赛事原样保留（绝不静默丢弃唯一交付物，纯视频赛照常诚实报错）；
+ * - 多项交付物时：排除仅在特殊条件下才需提交的例外文件（如非首次参赛原作品、减员申请表）；
+ * - 若同时混入了多个互斥赛道且其中某赛道含系统无法制作的视频/音频项，则自动聚焦可完整交付的主赛道，并将排除项写入缺口说明。
+ */
+export function selectActiveDeliverables(brief: Brief): {
+  brief: Brief;
+  skipped: string[];
+} {
+  if (brief.deliverables.length <= 1) return { brief, skipped: [] };
+  const skipped: string[] = [];
+  let active = [...brief.deliverables];
+
+  // 1. 排除仅在例外条件下提交的交付物（首次原创参赛无需提交）
+  const nonConditional = active.filter((d) => {
+    const text = [d.type, ...d.limits].join(" ");
+    if (conditionalDeliverableRe.test(text)) {
+      skipped.push(`已排除不适用首次原创参赛的条件交付物：「${d.type}」`);
+      return false;
+    }
+    return true;
+  });
+  if (nonConditional.length >= 1) active = nonConditional;
+
+  // 2. 若混入多赛道且某赛道含不可制作媒体（如视频），优先聚焦完全可制作的主赛道
+  if (active.length > 1) {
+    const producible = new Set(Object.values(kindFormats).flat());
+    const isProducibleItem = (d: Brief["deliverables"][number]) => {
+      if (unsupportedMediaDeliverableRe.test([d.type, ...d.formats].join(" ")))
+        return false;
+      const wanted = requestedFormats(d).filter((f) => f !== "zip");
+      return wanted.length === 0 || wanted.some((f) => producible.has(f));
+    };
+    const trackGroups = new Map<string, Brief["deliverables"][number][]>();
+    for (const d of active) {
+      const tag = deliverableTrackTag(d);
+      if (tag) trackGroups.set(tag, [...(trackGroups.get(tag) || []), d]);
+    }
+    if (trackGroups.size >= 2) {
+      const cleanTracks = [...trackGroups.entries()].filter(([, items]) =>
+        items.every((d) => isProducibleItem(d) && (d.formats.length > 0 || !!d.official_template)),
+      );
+      const dirtyTracks = [...trackGroups.entries()].filter(([, items]) =>
+        items.some((d) => !isProducibleItem(d) || (!d.formats.length && !d.official_template)),
+      );
+      if (cleanTracks.length >= 1 && dirtyTracks.length >= 1) {
+        // 优先选择主体赛事/图片类/常规赛等核心可交付赛道，同时保留不属于任何赛道的公共交付物
+        cleanTracks.sort(([a], [b]) => {
+          const score = (t: string) =>
+            (/主体赛事|图片类|常规赛/.test(t) ? 2 : 0) + (trackGroups.get(t)!.length > 0 ? 1 : 0);
+          return score(b) - score(a);
+        });
+        const [chosenTrack, chosenItems] = cleanTracks[0]!;
+        const commonItems = active.filter((d) => !deliverableTrackTag(d) && isProducibleItem(d));
+        const next = [...chosenItems, ...commonItems];
+        if (next.length >= 1 && next.length < active.length) {
+          for (const d of active)
+            if (!next.includes(d))
+              skipped.push(
+                `赛事含多赛道，已聚焦可完整交付的「${chosenTrack}」，跳过跨赛道或不可制作项：「${d.type}」`,
+              );
+          active = next;
+        }
+      }
+    }
+  }
+
+  // 3. 若主交付物已明确且存在后续阶段/另附视频类材料，剥离该辅助视频项并明确提示人工准备
+  if (active.length > 1) {
+    const nonAuxVideo = active.filter((d) => {
+      const text = [d.type, ...d.formats, ...d.limits].join(" ");
+      const isAuxVideo =
+        unsupportedMediaDeliverableRe.test(text) &&
+        /终审|复赛|决赛|可选|另附|视频类|短视频|演示视频|视频演示/i.test(text);
+      if (isAuxVideo) {
+        skipped.push(
+          `「${d.type}」为视频/后续阶段辅助材料，系统不制作视频，请人工按需准备`,
+        );
+        return false;
+      }
+      return true;
+    });
+    if (nonAuxVideo.length >= 1) active = nonAuxVideo;
+  }
+
+  if (active.length === brief.deliverables.length) return { brief, skipped: [] };
+  return { brief: { ...brief, deliverables: active }, skipped };
+}
 /**
  * 公告里的“小说/散文/诗歌/视频/短剧”是体裁或作品类别，不是文件格式。
  * 把体裁当格式会让这类赛事永远规划不出可执行任务，所以要单独剔掉。
@@ -1005,10 +1116,10 @@ async function writeWork(
   }));
   const imageSpec = slides
     ? imageList.length
-      ? `可用的已生成图片与图表（语义版式用 "imageRef":"图片 ref"，自由布局用 {"type":"image","ref":"图片 ref","x":0,"y":0,"w":6,"h":4}）：${JSON.stringify(imageList)}。展示外观、结构、场景、仿真数据的页面应放入对应图片，不要只写文件名。`
+      ? `可用的已生成图片与图表（语义版式用 "imageRef":"图片 ref"，自由布局用 {"type":"image","ref":"图片 ref","x":0,"y":0,"w":6,"h":4}）：${JSON.stringify(imageList)}。展示外观、结构、场景、仿真数据的页面应放入对应图片，不要只写文件名；也不要在可见的标题、要点或图题文字中写出内部 ref 代号（如 sim-chart-1），只用“左图”“仿真对比图”等自然语言指代。`
       : "目前没有可用的已生成图片，不要使用 imageRef 或 image 元素。"
     : imageList.length
-      ? `正文可直接用标准 Markdown 图片语法 \`![图题](ref)\` 嵌入已生成的高清图片或仿真图表，可用 ref：${JSON.stringify(imageList)}。严禁编造不存在的图片文件名或链接！`
+      ? `正文可直接用标准 Markdown 图片语法 \`![图题](ref)\` 嵌入已生成的高清图片或仿真图表，可用 ref：${JSON.stringify(imageList)}。严禁编造不存在的图片文件名或链接；正文叙述中用“如图1所示”等自然语言指代，不要把内部 ref 代号写进正文字句。`
       : "正文不得编造不存在的图片文件名或 Markdown 图片链接；需要展示系统架构、工作流程或定量对比图时，请使用 \`\`\`mermaid 代码块（flowchart TD/LR、sequenceDiagram、stateDiagram-v2）或 \`\`\`chart JSON 代码块（支持 bar/horizontal-bar/line/pie/donut/radar），导出系统会自动将其渲染为高清图片并嵌入 DOCX/PDF。";
   const spec = slides
     ? `优先使用语义化专业版式输出 JSON {"kind":"slides","title":"","theme":"${ctx.projectSpec?.theme || "academic-blue"}","sources":[],${needs},"slides":[{"layout":"cover|toc|hero-stats|two-column|image-text|architecture|table|chart|timeline|ending","title":"页标题","subtitle":"可选副标题","kicker":"可选英文/短标签","bullets":["精简要点"],"metrics":[{"value":"核心数","label":"指标名","detail":"说明"}],"left":{"heading":"左栏标题","points":["要点"]},"right":{"heading":"右栏标题","points":["要点"]},"imageRef":"可选图片ref","imageCaption":"可选图题","imageSide":"left|right","mermaid":"可选mermaid流程/架构代码","chart":{"type":"bar|line|pie|donut|radar","title":"图名","labels":["A","B"],"series":[{"name":"系列","values":[1,2]}]},"table":{"headers":["列1","列2"],"rows":[["值1","值2"]]},"steps":[{"phase":"阶段1","title":"名称","detail":"说明"}],"meta":["作者/学校"]}]}` +
@@ -1019,7 +1130,7 @@ async function writeWork(
   const specBlock = projectSpecPrompt(ctx.projectSpec, task.kind);
   let previous: unknown = null;
   if (round > 0) {
-    for (const suffix of ["-repair", ""]) {
+    for (const suffix of ["-repair-2", "-repair", ""]) {
       try {
         previous = JSON.parse(
           await readFile(
@@ -1119,26 +1230,28 @@ ${feedback.length ? `上一版未通过评审，必须逐条解决：\n${feedbac
   };
   applyWorkProfile(work);
   const availImages = slides || task.kind === "document" ? imagePaths(ctx) : undefined;
-  const layout = validateWork(work, availImages);
-  if (layout.length)
+  let remaining = validateWork(work, availImages);
+  for (let repairIdx = 0; remaining.length && repairIdx < 2; repairIdx++) {
+    const repairSuffix = repairIdx === 0 ? "-repair" : `-repair-${repairIdx + 1}`;
     work = await cached(
       ctx.cfg,
       ctx.store,
       ctx.jobId,
-      `${taskKey(ctx, task)}-r${round + 1}-repair.json`,
+      `${taskKey(ctx, task)}-r${round + 1}${repairSuffix}.json`,
       Work,
       label,
       async () =>
         parseJSON(
           await ctx.gateway.generate(
             "writer",
-            `${prompt}\n自动检查未通过，请修复这些问题并仅输出完整作品 JSON：${JSON.stringify(layout)}\n需要修复的作品：${JSON.stringify(work)}`,
+            `${prompt}\n自动结构检查未通过，请严格只修改报错涉及的页面或字段（如精简超限页面的措辞），其余合格页面原样保留、不要扩写，然后仅输出完整作品 JSON：${JSON.stringify(remaining)}\n需要修复的作品：${JSON.stringify(work)}`,
           ),
         ),
     );
-  if (work.kind !== want) throw Error(`修复后的作品类型 ${work.kind} 与要求 ${want} 不符`);
-  applyWorkProfile(work);
-  const remaining = validateWork(work, availImages);
+    if (work.kind !== want) throw Error(`修复后的作品类型 ${work.kind} 与要求 ${want} 不符`);
+    applyWorkProfile(work);
+    remaining = validateWork(work, availImages);
+  }
   if (remaining.length) throw Error(`修复后的作品仍未通过结构检查：${remaining.join("；")}`);
   const folder = taskFolder(ctx, task, round);
   const out = await renderWork(
@@ -1218,6 +1331,14 @@ async function drawImage(
   round: number,
   feedback: string[],
 ): Promise<Attempt> {
+  const item = ctx.brief.deliverables[task.deliverable];
+  const spec = parseImageSpec([
+    task.title,
+    task.instructions,
+    ...task.acceptance,
+    item?.type || "",
+    ...(item?.limits || []),
+  ]);
   const visual = await cached(
     ctx.cfg,
     ctx.store,
@@ -1229,7 +1350,7 @@ async function drawImage(
       parseJSON(
         await ctx.gateway.generate(
           "writer",
-          `${Guard}\n根据赛事要求和选题，设计一张独特的图片作品。${strategyPrompt(ctx.selection, task.kind)}只输出 JSON {"image_prompt":"无文字的图像画面描述","caption":"由你撰写的简短图题或空字符串","caption_mode":"band"}。图片模型只画画面、不画文字；caption 会由程序排在画面下方的独立色带里，不会遮挡画面。只有海报类作品确实需要文字压在画面上时才用 "caption_mode":"overlay"，并给出 caption_x、caption_y（0-1 比例）把文字放在画面空白处。一张图只画一个画面，不要拼成多格。不得伪造照片或事实。${feedback.length ? `上一版评审意见（必须解决）：${JSON.stringify(feedback)}` : ""}任务 ${JSON.stringify(task)} 要求 ${JSON.stringify(ctx.brief)} 选题 ${JSON.stringify(ctx.idea)}`,
+          `${Guard}\n根据赛事要求和选题，设计一张独特的图片作品。${strategyPrompt(ctx.selection, task.kind)}只输出 JSON {"image_prompt":"无文字的图像画面描述","caption":"由你撰写的简短图题或空字符串","caption_mode":"band"}。图片模型只画画面、不画文字；若任务要求纯画面、不要出现说明文字或黑底文字带，请把 caption 设为空字符串 ""；需要独立底部图注时才填 caption 并用 "band"；海报需要少量标题压在画面留白处时用 "overlay" 并给出 caption_x、caption_y（0-1 比例）。一张图只画一个画面，不要拼成多格。不得伪造照片或事实。${spec.orientation ? `当前目标画幅方向为 ${spec.orientation}${spec.width && spec.height ? `（${spec.width}x${spec.height}${spec.dpi ? ` @ ${spec.dpi}DPI` : ""}）` : ""}，构图必须适配该方向。` : ""}${feedback.length ? `上一版评审意见（必须解决）：${JSON.stringify(feedback)}` : ""}任务 ${JSON.stringify(task)} 要求 ${JSON.stringify(ctx.brief)} 选题 ${JSON.stringify(ctx.idea)}`,
         ),
       ),
   );
@@ -1238,6 +1359,7 @@ async function drawImage(
     visual,
     task.format as "png" | "jpg",
     taskFolder(ctx, task, round),
+    spec,
   );
   return {
     paths: [out],
@@ -1960,6 +2082,17 @@ export async function runTask(ctx: Ctx, task: PlanTask): Promise<TaskResult> {
         ).catch(() => {});
         throw e;
       }
+      // 若此前已有完全通过验收的候选版本（当前轮只是冲奖精修），制作异常时单调回退到已通过的最佳版本，不毁掉成稿。
+      if (bestPassing) {
+        return done(
+          "submission",
+          bestPassing.attempt,
+          bestPassing.review,
+          bestPassing.rounds,
+          [],
+          bestPassing.requirements,
+        );
+      }
       // 返工轮里其他失败仍然交给下一轮；最后一轮还失败就直接抛错，不保留“看起来完成了”的草稿。
       if (round === rounds - 1)
         throw Error(
@@ -2333,9 +2466,15 @@ export async function runOrchestration(
   assertJobCanRun(store, jobId);
   gateway = controlledGateway(store, jobId, gateway);
   const c = store.competition(competitionId);
-  const brief = c.brief as Brief;
+  const rawBrief = c.brief as Brief;
+  const scoped = selectActiveDeliverables(rawBrief);
+  const brief = scoped.brief;
   let evidence = contents(store, competitionId);
-  const gaps: string[] = [...brief.missing, ...(brief.research?.missing || [])];
+  const gaps: string[] = [
+    ...scoped.skipped,
+    ...brief.missing,
+    ...(brief.research?.missing || []),
+  ];
   let sourceText: string | null = null;
   if (
     brief.deliverables.some((d) => /translation|翻译|译文|译稿/i.test(d.type))

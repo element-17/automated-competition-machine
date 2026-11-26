@@ -27,6 +27,7 @@ export type ArtifactMetrics = {
   pages?: number;
   width?: number;
   height?: number;
+  dpi?: number;
   entries?: string[];
   /** 工作簿的工作表数与总数据行数（xlsx）。 */
   sheets?: number;
@@ -266,6 +267,7 @@ export async function measureArtifact(path: string): Promise<ArtifactMetrics> {
       const info = await sharp(path).metadata();
       result.width = info.width;
       result.height = info.height;
+      if (info.density) result.dpi = info.density;
     }
     // xlsx 必须能被真实解析成 OOXML 工作簿；改名冒充的 CSV/HTML 在这里直接报错。
     if (ext === ".xlsx") {
@@ -790,7 +792,10 @@ export function formatArtifactMetadata(metrics: ArtifactMetrics[]): string {
       if (m.tableCount !== undefined) parts.push(`表格数=${m.tableCount}`);
       if (m.imageCount !== undefined) parts.push(`实测嵌入图片数=${m.imageCount}`);
       if (m.sheets !== undefined) parts.push(`工作表=${m.sheets}（总行=${m.rows ?? 0}）`);
-      if (m.width && m.height) parts.push(`分辨率=${m.width}x${m.height}`);
+      if (m.width && m.height)
+        parts.push(
+          `分辨率=${m.width}x${m.height}${m.dpi ? `（${m.dpi}DPI）` : ""}，高宽比=${(m.height / m.width).toFixed(3)}:1`,
+        );
       if (m.typography) {
         const t = [
           m.typography.bodyFont ? `正文字体=${m.typography.bodyFont}` : "",

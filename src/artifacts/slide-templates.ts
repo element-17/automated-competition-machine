@@ -206,18 +206,46 @@ export function validateSemanticSlide(
       issues.push(`第 ${pageNum} 页表格各行列数与表头（${cols} 列）不一致`);
   }
   const chars = semanticSlideTextLength(slide);
-  const limit = slide.layout === "table" ? 360 : 260;
+  const limit =
+    slide.layout === "table"
+      ? 560
+      : slide.layout === "two-column" || slide.layout === "timeline" || slide.layout === "hero-stats"
+        ? 360
+        : 300;
   if (chars > limit)
     issues.push(`第 ${pageNum} 页文字过多（${chars} 字，上限 ${limit} 字），请精简要点或拆分页面`);
   return issues;
 }
 
-async function toJpegDataUri(input: string | Buffer): Promise<string> {
-  const data = await sharp(input)
+/** 剥掉模型自带的行首项目符号（避免母版统一加“• / ▪”后出现“• ◆”双重符号）。 */
+const stripBullet = (text: string) =>
+  text.replace(/^\s*(?:[•▪▸►◆◇●○■□★☆✓✔✅🔹🔸▶\-–—\*]|(?:\d+|[一二三四五六七八九十]+)[.、)])\s*/u, "").trim();
+
+async function toFittedImage(
+  input: string | Buffer,
+  box: { x: number; y: number; w: number; h: number },
+): Promise<{ data: string; x: number; y: number; w: number; h: number }> {
+  const img = sharp(input);
+  const meta = await img.metadata();
+  const data = await img
     .resize({ width: 1920, height: 1920, fit: "inside", withoutEnlargement: true })
     .jpeg({ quality: 88 })
     .toBuffer();
-  return `data:image/jpeg;base64,${data.toString("base64")}`;
+  const iw = meta.width || 1600;
+  const ih = meta.height || 900;
+  const aspect = iw / ih;
+  const boxAspect = box.w / box.h;
+  let w = box.w;
+  let h = box.h;
+  if (aspect > boxAspect) h = box.w / aspect;
+  else w = box.h * aspect;
+  return {
+    data: `data:image/jpeg;base64,${data.toString("base64")}`,
+    x: Number((box.x + (box.w - w) / 2).toFixed(3)),
+    y: Number((box.y + (box.h - h) / 2).toFixed(3)),
+    w: Number(w.toFixed(3)),
+    h: Number(h.toFixed(3)),
+  };
 }
 
 function addHeader(
@@ -321,7 +349,11 @@ export async function renderSemanticSlide(
 ) {
   const { theme, index, total, deckTitle, images } = opts;
   const page = ppt.addSlide();
-  page.background = { color: slide.layout === "cover" || slide.layout === "ending" ? theme.primary : theme.bg };
+  const isDarkTheme = theme.name === "tech-dark";
+  const coverBg = isDarkTheme ? "0B1120" : theme.primary;
+  const coverText = isDarkTheme ? theme.text : theme.onPrimary;
+  const coverMuted = isDarkTheme ? theme.muted : theme.onPrimary;
+  page.background = { color: slide.layout === "cover" || slide.layout === "ending" ? coverBg : theme.bg };
   const bodyTop = slide.subtitle ? 1.62 : 1.46;
 
   if (slide.layout === "cover") {
@@ -330,8 +362,8 @@ export async function renderSemanticSlide(
       y: 0,
       w: 0.28,
       h: 7.5,
-      fill: { color: theme.accent },
-      line: { color: theme.accent },
+      fill: { color: theme.primary },
+      line: { color: theme.primary },
     });
     const hasHero = !!(slide.imageRef && images[slide.imageRef]);
     const textW = hasHero ? 7.2 : 11.4;
@@ -344,7 +376,7 @@ export async function renderSemanticSlide(
         fontFace: "Microsoft YaHei",
         fontSize: 14,
         bold: true,
-        color: theme.accent === theme.primary ? theme.onPrimary : theme.onPrimary,
+        color: isDarkTheme ? theme.primary : coverText,
         margin: 0,
       });
     }
@@ -356,7 +388,7 @@ export async function renderSemanticSlide(
       fontFace: "Microsoft YaHei",
       fontSize: 38,
       bold: true,
-      color: theme.onPrimary,
+      color: coverText,
       margin: 0,
       fit: "shrink",
     });
@@ -368,7 +400,7 @@ export async function renderSemanticSlide(
         h: 0.9,
         fontFace: "Microsoft YaHei",
         fontSize: 18,
-        color: theme.onPrimary,
+        color: coverMuted,
         margin: 0,
         fit: "shrink",
       });
@@ -381,24 +413,27 @@ export async function renderSemanticSlide(
         h: 0.65,
         fontFace: "Microsoft YaHei",
         fontSize: 14,
-        color: theme.onPrimary,
+        color: coverMuted,
         margin: 0,
       });
     }
     if (hasHero) {
-      page.addImage({
-        data: await toJpegDataUri(images[slide.imageRef!]!),
-        x: 8.45,
-        y: 1.15,
-        w: 4.35,
-        h: 5.2,
-        sizing: { type: "contain", w: 4.35, h: 5.2 },
-      });
+      page.addImage(
+        await toFittedImage(images[slide.imageRef!]!, { x: 8.45, y: 1.15, w: 4.35, h: 5.2 }),
+      );
     }
     return;
   }
 
   if (slide.layout === "ending") {
+    page.addShape(ppt.ShapeType.rect, {
+      x: 0,
+      y: 0,
+      w: 13.333,
+      h: 0.12,
+      fill: { color: theme.primary },
+      line: { color: theme.primary },
+    });
     page.addText(slide.title, {
       x: 1.0,
       y: 1.7,
@@ -407,7 +442,7 @@ export async function renderSemanticSlide(
       fontFace: "Microsoft YaHei",
       fontSize: 38,
       bold: true,
-      color: theme.onPrimary,
+      color: coverText,
       align: "center",
       fit: "shrink",
     });
@@ -419,7 +454,7 @@ export async function renderSemanticSlide(
         h: 0.7,
         fontFace: "Microsoft YaHei",
         fontSize: 18,
-        color: theme.onPrimary,
+        color: coverMuted,
         align: "center",
       });
     }
@@ -433,6 +468,7 @@ export async function renderSemanticSlide(
           y: 4.15,
           w: cardW,
           h: 1.35,
+          rectRadius: 0.06,
           fill: { color: theme.surface },
           line: { color: theme.border },
         });
@@ -459,7 +495,7 @@ export async function renderSemanticSlide(
         h: 0.5,
         fontFace: "Microsoft YaHei",
         fontSize: 14,
-        color: theme.onPrimary,
+        color: coverMuted,
         align: "center",
       });
     }
@@ -536,6 +572,7 @@ export async function renderSemanticSlide(
         y: bodyTop + 0.15,
         w: cardW,
         h: cardH,
+        rectRadius: 0.05,
         fill: { color: theme.surface },
         line: { color: theme.border },
       });
@@ -597,7 +634,7 @@ export async function renderSemanticSlide(
         line: { color: theme.border },
       });
       page.addText(
-        slide.bullets.map((b) => `▪  ${b}`).join("\n"),
+        slide.bullets.map((b) => `▪  ${stripBullet(b)}`).join("\n"),
         {
           x: 0.95,
           y: bodyTop + 3.3,
@@ -626,6 +663,7 @@ export async function renderSemanticSlide(
         y: bodyTop + 0.1,
         w: 5.85,
         h: 5.15,
+        rectRadius: 0.04,
         fill: { color: theme.surface },
         line: { color: theme.border },
       });
@@ -638,19 +676,19 @@ export async function renderSemanticSlide(
         line: { color: c.bar },
       });
       page.addText(c.block.heading, {
-        x: c.x + 0.24,
+        x: c.x + 0.22,
         y: bodyTop + 0.14,
-        w: 5.37,
+        w: 5.41,
         h: 0.48,
         fontFace: "Microsoft YaHei",
-        fontSize: 18,
+        fontSize: 16,
         bold: true,
         color: theme.onPrimary,
         valign: "middle",
         fit: "shrink",
       });
       page.addText(
-        c.block.points.map((p) => `•  ${p}`).join("\n\n"),
+        c.block.points.map((p) => `•  ${stripBullet(p)}`).join("\n\n"),
         {
           x: c.x + 0.26,
           y: bodyTop + 0.85,
@@ -680,19 +718,19 @@ export async function renderSemanticSlide(
       fill: { color: theme.surface },
       line: { color: theme.border },
     });
-    let imgUri: string | null = null;
-    if (slide.imageRef && images[slide.imageRef]) imgUri = await toJpegDataUri(images[slide.imageRef]!);
-    else if (slide.mermaid) imgUri = await toJpegDataUri((await renderMermaidPng(slide.mermaid)).data);
-    else if (slide.chart) imgUri = await toJpegDataUri((await renderChartPng(slide.chart)).data);
-    if (imgUri) {
-      page.addImage({
-        data: imgUri,
-        x: imgX + 0.15,
-        y: bodyTop + 0.22,
-        w: 5.7,
-        h: 4.56,
-        sizing: { type: "contain", w: 5.7, h: 4.56 },
-      });
+    let imgInput: string | Buffer | null = null;
+    if (slide.imageRef && images[slide.imageRef]) imgInput = images[slide.imageRef]!;
+    else if (slide.mermaid) imgInput = (await renderMermaidPng(slide.mermaid)).data;
+    else if (slide.chart) imgInput = (await renderChartPng(slide.chart)).data;
+    if (imgInput) {
+      page.addImage(
+        await toFittedImage(imgInput, {
+          x: imgX + 0.15,
+          y: bodyTop + 0.22,
+          w: 5.7,
+          h: 4.56,
+        }),
+      );
     }
     if (slide.imageCaption) {
       page.addText(slide.imageCaption, {
@@ -752,19 +790,19 @@ export async function renderSemanticSlide(
       fill: { color: theme.surface },
       line: { color: theme.border },
     });
-    let imgUri: string | null = null;
-    if (slide.mermaid) imgUri = await toJpegDataUri((await renderMermaidPng(slide.mermaid)).data);
-    else if (slide.imageRef && images[slide.imageRef]) imgUri = await toJpegDataUri(images[slide.imageRef]!);
-    else if (slide.chart) imgUri = await toJpegDataUri((await renderChartPng(slide.chart)).data);
-    if (imgUri) {
-      page.addImage({
-        data: imgUri,
-        x: 0.85,
-        y: bodyTop + 0.2,
-        w: 11.63,
-        h: diagH - 0.24,
-        sizing: { type: "contain", w: 11.63, h: diagH - 0.24 },
-      });
+    let imgInput: string | Buffer | null = null;
+    if (slide.mermaid) imgInput = (await renderMermaidPng(slide.mermaid)).data;
+    else if (slide.imageRef && images[slide.imageRef]) imgInput = images[slide.imageRef]!;
+    else if (slide.chart) imgInput = (await renderChartPng(slide.chart)).data;
+    if (imgInput) {
+      page.addImage(
+        await toFittedImage(imgInput, {
+          x: 0.85,
+          y: bodyTop + 0.2,
+          w: 11.63,
+          h: diagH - 0.24,
+        }),
+      );
     }
     if (hasBottom) {
       const items = slide.bullets!.slice(0, 4);
@@ -843,14 +881,14 @@ export async function renderSemanticSlide(
       fill: { color: "FFFFFF" },
       line: { color: theme.border },
     });
-    page.addImage({
-      data: await toJpegDataUri(png.data),
-      x: 0.78,
-      y: bodyTop + 0.2,
-      w: chartW - 0.26,
-      h: 4.9,
-      sizing: { type: "contain", w: chartW - 0.26, h: 4.9 },
-    });
+    page.addImage(
+      await toFittedImage(png.data, {
+        x: 0.78,
+        y: bodyTop + 0.2,
+        w: chartW - 0.26,
+        h: 4.9,
+      }),
+    );
     if (hasNotes) {
       page.addShape(ppt.ShapeType.roundRect, {
         x: 9.0,
@@ -871,7 +909,7 @@ export async function renderSemanticSlide(
         color: theme.primary,
       });
       page.addText(
-        slide.bullets!.map((b) => `▪  ${b}`).join("\n\n"),
+        slide.bullets!.map((b) => `▪  ${stripBullet(b)}`).join("\n\n"),
         {
           x: 9.22,
           y: bodyTop + 0.82,

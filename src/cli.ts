@@ -1,7 +1,14 @@
 #!/usr/bin/env node
 import { Command } from "commander";
 import { readFileSync } from "node:fs";
-import { loadConfig, savePrompt, executionSettings } from "./core/config.js";
+import { join } from "node:path";
+import {
+  browserSettings,
+  deliverySettings,
+  loadConfig,
+  savePrompt,
+  executionSettings,
+} from "./core/config.js";
 import {
   agents,
   agentLabels,
@@ -49,6 +56,21 @@ import {
   browserAvailability,
   inspectSoftware,
 } from "./artifacts/browser-checks.js";
+import {
+  BrowserSessionStore,
+  createGatewayBrowserAdapter,
+  openInteractiveLogin,
+} from "./browser/index.js";
+import {
+  exploreCompetitionWithBrowser,
+  fetchDocumentWithBrowser,
+  ingestDownloadedAttachments,
+} from "./competition/browser-fetcher.js";
+import {
+  createDefaultDeliveryRegistry,
+  detectSubmissionTargets,
+  resolveJobDeliverableFiles,
+} from "./delivery/index.js";
 import { flushTracing, finishProcess } from "./core/tracing.js";
 
 const program = new Command();
@@ -82,8 +104,171 @@ program
   });
 program
   .command("browser-status")
-  .description("查看浏览器验收环境")
+  .description("查看浏览器验收与内置后台浏览器环境")
   .action(() => print(browserAvailability()));
+program
+  .command("browser-login")
+  .description("弹出浏览器供人工登录/扫码，保存持久 Cookie 供后续后台无头操作复用")
+  .argument("<url>", "需要登录的赛事官网或报名系统地址")
+  .option("-p, --profile <name>", "自定义会话名称（默认按域名保存）")
+  .action(async (url, opts) => {
+    const cfg = loadConfig(program.opts().config);
+    const sessionStore = new BrowserSessionStore(cfg.dataDir);
+    const saved = await openInteractiveLogin(sessionStore, url, {
+      profile: opts.profile,
+    });
+    print(saved);
+  });
+program
+  .command("browser-sessions")
+  .description("查看或清理已保存的内置浏览器登录会话")
+  .option("--clear <name>", "删除指定名称的登录会话")
+  .action((opts) => {
+    const cfg = loadConfig(program.opts().config);
+    const sessionStore = new BrowserSessionStore(cfg.dataDir);
+    if (opts.clear) {
+      print({ cleared: opts.clear, removed: sessionStore.remove(opts.clear) });
+      return;
+    }
+    print({ rootDir: sessionStore.rootDir, sessions: sessionStore.list() });
+  });
+program
+  .command("browser-agent")
+  .description("在后台无头浏览器中运行 Computer-Use 代理（不占用鼠标），自主点击浏览或下载比赛附件")
+  .argument("<url>", "起始页面网址")
+  .requiredOption("-g, --goal <goal>", "要完成的浏览/提取/下载目标")
+  .option("-p, --profile <name>", "指定已保存的登录会话名（默认按域名自动匹配）")
+  .option("-d, --download-dir <dir>", "附件下载保存目录")
+  .option("--max-steps <n>", "最大交互步数", Number)
+  .option("--no-vision", "禁用截图，仅使用 DOM @eN 元素引用决策")
+  .action(async (url, opts) => {
+    const { cfg, store, gateway } = context();
+    try {
+      const bCfg = browserSettings(cfg);
+      const res = await exploreCompetitionWithBrowser(gateway, url, opts.goal, {
+        dataDir: cfg.dataDir,
+        profile: opts.profile,
+        downloadDir: opts.downloadDir,
+        maxSteps: opts.maxSteps ?? bCfg.maxSteps,
+        useVision: opts.vision === false ? false : bCfg.useVision,
+        headless: bCfg.headless,
+      });
+      print(res);
+      if (res.status === "failed") process.exitCode = 1;
+    } finally {
+      store.close();
+    }
+  });
+program
+  .command("deliver")
+  .description("通过邮箱（SMTP）或内置无头浏览器交付已完成任务的作品；默认先演练预览")
+  .argument("<job-id>", "任务 ID")
+  .option("-m, --channel <channel>", "交付通道：auto、email、browser", "auto")
+  .option("--to <target>", "指定收件邮箱或在线提交网址（留空时自动从赛事规则识别）")
+  .option("--subject <subject>", "邮箱交付主题（可选）")
+  .option("-p, --profile <name>", "浏览器交付使用的登录会话名")
+  .option("--instructions <text>", "给浏览器填表代理的补充说明（如所选赛道）")
+  .option("--send", "正式执行交付（不加此参数时仅做安全演练预览）")
+  .option("--submit", "浏览器交付时允许点击最终提交按钮（默认在提交前截图暂停）")
+  .action(async (jobId, opts) => {
+    const { cfg, store, gateway } = context();
+    try {
+      const job = store.job(jobId);
+      const comp = store.competition(job.competitionId);
+      const jobDir = join(cfg.dataDir, "jobs", jobId);
+      const outputs = Array.isArray(job.result?.outputs)
+        ? (job.result.outputs as string[])
+        : [];
+      const resolved = resolveJobDeliverableFiles(jobDir, outputs);
+      if (!resolved.files.length) {
+        throw Error(`任务 ${jobId} 下未找到可交付的作品文件（目录：${jobDir}）`);
+      }
+
+      const detected = detectSubmissionTargets(
+        comp.brief,
+        comp.url,
+        store.evidence(comp.id),
+      );
+      let channel = String(opts.channel || "auto");
+      let targetStr = opts.to ? String(opts.to).trim() : "";
+
+      if (channel === "auto") {
+        if (targetStr) {
+          channel = targetStr.includes("@") && !/^https?:\/\//i.test(targetStr)
+            ? "email"
+            : "browser";
+        } else if (detected.length) {
+          channel = detected[0]!.channel;
+          targetStr = detected[0]!.target;
+        } else {
+          throw Error("无法自动识别交付目标，请使用 --channel 和 --to 明确指定邮箱或网址");
+        }
+      } else if (!targetStr) {
+        const hit = detected.find((d) => d.channel === channel);
+        if (!hit) {
+          throw Error(`未能从赛事规则自动提取 ${channel} 交付目标，请通过 --to 指定`);
+        }
+        targetStr = hit.target;
+      }
+
+      const dCfg = deliverySettings(cfg);
+      const bCfg = browserSettings(cfg);
+      const registry = createDefaultDeliveryRegistry();
+      const receipt = await registry.execute(
+        {
+          jobId,
+          competitionId: comp.id,
+          competitionTitle: comp.title,
+          files: resolved.files,
+          bundleZipPath: resolved.bundleZipPath,
+          profile: cfg.profile as Record<string, unknown>,
+          dryRun: !opts.send,
+          stopBeforeSubmit: opts.submit ? false : dCfg.confirmBeforeSubmit,
+          target:
+            channel === "email"
+              ? {
+                  channel: "email",
+                  address: targetStr,
+                  subject: opts.subject,
+                }
+              : {
+                  channel: "browser",
+                  url: targetStr,
+                  browserProfile: opts.profile,
+                  instructions: opts.instructions,
+                },
+        },
+        {
+          dataDir: cfg.dataDir,
+          email: dCfg.email,
+          browserModel: createGatewayBrowserAdapter(gateway, {
+            agent: "reviewer",
+            preferVision: bCfg.useVision,
+          }),
+          browserMaxSteps: bCfg.maxSteps,
+          browserUseVision: bCfg.useVision,
+          browserHeadless: bCfg.headless,
+        },
+      );
+      store.addDelivery(receipt);
+      print({ detectedTargets: detected, receipt });
+      if (receipt.status === "failed") process.exitCode = 1;
+    } finally {
+      store.close();
+    }
+  });
+program
+  .command("deliveries")
+  .description("查看作品交付历史与回执记录")
+  .argument("[job-id]", "可选：按任务 ID 筛选")
+  .action((jobId) => {
+    const { store } = context();
+    try {
+      print({ deliveries: store.deliveries(jobId) });
+    } finally {
+      store.close();
+    }
+  });
 function context() {
   const cfg = loadConfig(program.opts().config);
   const store = new Store(cfg.dataDir);
@@ -142,11 +327,50 @@ program
   .description("发现或导入公开赛事公告")
   .option("-q, --query <query>", "搜索关键词")
   .option("-u, --url <url>", "导入赛事公告 URL")
+  .option("--browser", "使用内置无头浏览器渲染导入页面并自动下载比赛附件")
+  .option("--profile <name>", "配合 --browser 使用的已保存登录会话名")
   .action(async (opts) => {
     const { cfg, store, gateway } = context();
     try {
+      const bCfg = browserSettings(cfg);
+      const browserFallback =
+        process.env.COMPETE_DISABLE_BROWSER !== "1" &&
+        bCfg.enabled &&
+        bCfg.autoFallback
+          ? {
+              dataDir: cfg.dataDir,
+              profile: opts.profile,
+              headless: bCfg.headless,
+              downloadAttachments: bCfg.downloadAttachments,
+            }
+          : undefined;
       if (opts.url) {
-        const d = await fetchDocument(opts.url);
+        if (opts.browser) {
+          const doc = await fetchDocumentWithBrowser(opts.url, {
+            dataDir: cfg.dataDir,
+            profile: opts.profile,
+            headless: bCfg.headless,
+            downloadAttachments: true,
+          });
+          const id = store.addCompetition(normalizeUrl(doc.url), doc.title);
+          const enqueued = store.enqueue(id);
+          const attachments = await ingestDownloadedAttachments(
+            store,
+            id,
+            doc.downloads,
+          );
+          print({
+            id,
+            title: doc.title,
+            url: normalizeUrl(doc.url),
+            enqueued,
+            via: "browser",
+            attachments,
+            downloads: doc.downloads,
+          });
+          return;
+        }
+        const d = await fetchDocument(opts.url, { browserFallback });
         const id = store.addCompetition(normalizeUrl(opts.url), d.title);
         const enqueued = store.enqueue(id);
         print({ id, title: d.title, url: normalizeUrl(opts.url), enqueued });
@@ -165,6 +389,7 @@ program
         opts.query,
         cfg.sources,
         cfg.search,
+        browserFallback,
       );
       let enqueued = 0;
       const found = ids.map((id) => {

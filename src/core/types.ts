@@ -73,6 +73,9 @@ export type SearchOptions = {
   pages?: number;
   timeRange?: "any" | "day" | "week" | "month" | "year";
 };
+export type ImageGenerationOptions = {
+  orientation?: "landscape" | "portrait" | "square";
+};
 export interface ModelGateway {
   readonly canSearch?: boolean;
   reportProgress?(event: JobProgress): Promise<void>;
@@ -82,7 +85,10 @@ export interface ModelGateway {
     prompt: string,
   ): Promise<{ text: string; sessionId: string; events: unknown[] }>;
   buildProject?(workspace: string, prompt: string): Promise<void>;
-  generateImage?(prompt: string): Promise<{ data: Buffer; mime: string }>;
+  generateImage?(
+    prompt: string,
+    options?: ImageGenerationOptions,
+  ): Promise<{ data: Buffer; mime: string }>;
   inspectImage?(
     prompt: string,
     image: { data: Buffer; mime: string },

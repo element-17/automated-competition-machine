@@ -46,6 +46,40 @@ export const qualitySettings = (cfg: {
   quality?: Partial<QualitySettings>;
 }): QualitySettings => Quality.parse(cfg.quality || {});
 
+/** 内置后台浏览器与 Computer-Use 配置；默认无头运行，不占用用户鼠标或焦点。 */
+const BrowserConfigSchema = z.object({
+  enabled: z.boolean().default(true),
+  autoFallback: z.boolean().default(true),
+  downloadAttachments: z.boolean().default(true),
+  headless: z.boolean().default(true),
+  useVision: z.boolean().default(true),
+  maxSteps: z.number().int().min(3).max(40).default(14),
+});
+export type BrowserSettings = z.infer<typeof BrowserConfigSchema>;
+export const browserSettings = (cfg: {
+  browser?: Partial<BrowserSettings>;
+}): BrowserSettings => BrowserConfigSchema.parse(cfg.browser || {});
+
+/** 多通道交付配置（邮箱 SMTP / 浏览器自动填表上传）；密钥均存放在 .env 环境变量中。 */
+const EmailDeliverySchema = z.object({
+  host: z.string().optional(),
+  port: z.number().int().min(1).max(65535).default(465),
+  secure: z.boolean().default(true),
+  user: z.string().optional(),
+  from: z.string().optional(),
+  passwordEnv: z.string().default("SMTP_PASS"),
+  maxAttachmentMb: z.number().min(1).max(100).default(25),
+});
+const DeliveryConfigSchema = z.object({
+  defaultChannel: z.enum(["auto", "email", "browser"]).default("auto"),
+  confirmBeforeSubmit: z.boolean().default(true),
+  email: EmailDeliverySchema.prefault({}),
+});
+export type DeliverySettings = z.infer<typeof DeliveryConfigSchema>;
+export const deliverySettings = (cfg: {
+  delivery?: Partial<DeliverySettings>;
+}): DeliverySettings => DeliveryConfigSchema.parse(cfg.delivery || {});
+
 const Execution = z.object({
   productionRounds: z.number().int().min(1).max(8).default(4),
   plannerRounds: z.number().int().min(1).max(5).default(3),
@@ -89,6 +123,8 @@ const Config = z
     search: Search.prefault({}),
     execution: Execution.prefault({}),
     quality: Quality.prefault({}),
+    browser: BrowserConfigSchema.prefault({}),
+    delivery: DeliveryConfigSchema.prefault({}),
     maxCalls: z.number().int().min(1).default(80),
     sources: z.array(z.string().url()).default([]),
     profile: z
@@ -215,6 +251,14 @@ export const saveExecutionConfig = (
   execution: ExecutionSettings,
   maxCalls: number,
 ) => patchConfig(path, { execution, maxCalls });
+export const saveBrowserConfig = (
+  path: string | undefined,
+  browser: BrowserSettings,
+) => patchConfig(path, { browser });
+export const saveDeliveryConfig = (
+  path: string | undefined,
+  delivery: DeliverySettings,
+) => patchConfig(path, { delivery });
 /** 写入单个 Agent 的系统提示词；text 为空时删除覆盖，恢复内置默认值。 */
 export function savePrompt(
   path: string | undefined,

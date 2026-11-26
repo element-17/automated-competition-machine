@@ -827,7 +827,10 @@ export class OfficialGateway implements ModelGateway {
     });
     return this.responseText(res, metrics);
   }
-  async generateImage(prompt: string) {
+  async generateImage(
+    prompt: string,
+    options?: { orientation?: "landscape" | "portrait" | "square" },
+  ) {
     this.charge();
     const a = this.agent("image");
     this.onProgress?.({
@@ -837,7 +840,13 @@ export class OfficialGateway implements ModelGateway {
       action: "生成图片",
     });
     try {
-      const full = `${promptOf(this.cfg, "image")}\n\n${prompt}`;
+      const orientationHint =
+        options?.orientation === "portrait"
+          ? "\nComposition orientation: vertical portrait framing (height greater than width)."
+          : options?.orientation === "square"
+            ? "\nComposition orientation: 1:1 square framing."
+            : "";
+      const full = `${promptOf(this.cfg, "image")}\n\n${prompt}${orientationHint}`;
       const signal = AbortSignal.timeout(
         executionSettings(this.cfg).requestTimeoutSeconds * 1000,
       );
@@ -847,7 +856,7 @@ export class OfficialGateway implements ModelGateway {
       return await this.tracked(a, "生成图片", () =>
         this.measured(this.callContext(a, "generateImage", "image"), 1, async (metrics) => {
           const image = a.provider.protocol === "openai"
-            ? await this.openaiImage(a, full, signal, metrics)
+            ? await this.openaiImage(a, full, signal, metrics, options?.orientation)
             : await this.geminiImage(a, full, signal, metrics);
           if (!image.data.length || image.data.length > 20_000_000)
             throw Error("图片为空或超过 20 MB");
@@ -895,11 +904,18 @@ export class OfficialGateway implements ModelGateway {
     prompt: string,
     signal: AbortSignal,
     metrics: AttemptUsage,
+    orientation?: "landscape" | "portrait" | "square",
   ) {
     const base = (a.provider.baseURL || "https://api.openai.com/v1").replace(
       /\/$/,
       "",
     );
+    const size =
+      orientation === "portrait"
+        ? "1024x1536"
+        : orientation === "square"
+          ? "1024x1024"
+          : "1536x1024";
     const res = await fetch(`${base}/images/generations`, {
       method: "POST",
       signal,
@@ -907,7 +923,7 @@ export class OfficialGateway implements ModelGateway {
         "content-type": "application/json",
         authorization: `Bearer ${this.key(a)}`,
       },
-      body: JSON.stringify({ model: a.model, prompt, size: "1536x1024", n: 1 }),
+      body: JSON.stringify({ model: a.model, prompt, size, n: 1 }),
     });
     const json = (await res.json().catch(() => null)) as any;
     if (!res.ok)
@@ -1059,6 +1075,15 @@ export class OfficialGateway implements ModelGateway {
         provider: a.provider.label,
         runtime: a.runtime,
         detail: "密钥、协议和运行时均可用（未启动实际任务）",
+      };
+    }
+    if (name === "image") {
+      const img = await this.generateImage("Minimalist clean geometric icon on white background, no text.");
+      return {
+        agent: name,
+        model: a.model,
+        provider: a.provider.label,
+        detail: `图片模型已成功响应（${img.mime}, ${img.data.length} bytes）`,
       };
     }
     await this.generate("reviewer", "只回复 OK。", name);

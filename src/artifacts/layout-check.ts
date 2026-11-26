@@ -142,13 +142,18 @@ export async function checkLayout(
   let rendered: RenderedDoc | undefined;
   const requested = criteria || [];
   const observations = new Map<number, z.infer<typeof Criterion>[]>();
+  const isExistentialCriterion = (req: string) =>
+    /(?:包含|含有|展示|呈现|绘制|给出|具备|带有|架构图|流程图|示意图|对比图|折线图|柱状图|数据表|封面|封底|目录)/.test(req) &&
+    !/(?:每页|全部页面|所有页面|各页|文字清晰|无溢出|无重叠)/.test(req);
   const summarize = () => {
     if (!criteria) return;
-    report.criteria = requested.map(({ criterion }) => {
+    report.criteria = requested.map(({ criterion, requirement }) => {
       const rows = observations.get(criterion) || [];
       const failed = rows.some((x) => x.status === "failed");
-      const passed = report.complete && rows.some((x) => x.status === "passed") &&
-        !rows.some((x) => x.status === "unverified");
+      const hasPassed = rows.some((x) => x.status === "passed");
+      const hasUnverified = rows.some((x) => x.status === "unverified");
+      // 存在性内容标准（如“包含系统架构图”）只需在承载该图的页面真实核验通过且无页面失败，不要求封面/其他页也出现同一张图。
+      const passed = report.complete && hasPassed && (!hasUnverified || isExistentialCriterion(requirement));
       return {
         criterion, status: failed ? "failed" : passed ? "passed" : "unverified",
         evidence: rows.map((x) => x.evidence).filter(Boolean).join("；") || "没有实际页面证据",
@@ -215,42 +220,84 @@ export async function checkLayout(
     }
     if (report.totalPages === null) failures.push("未能确定文档真实总页数");
     const total = report.totalPages;
-    for (const page of selected || [...shots.keys()]) {
+    const pagesToCheck = selected || [...shots.keys()];
+    const inspectOne = async (page: number) => {
       const out = shots.get(page);
-      if (!out) {
-        if (!report.failedPages.includes(page)) {
-          report.failedPages.push(page);
-          failures.push(`第 ${page} 页未成功渲染`);
-        }
-        continue;
-      }
+      if (!out) return { page, error: `第 ${page} 页未成功渲染`, missingShot: true as const };
+      const jpeg = await sharp(await readFile(out)).jpeg({ quality: 85 }).toBuffer();
+      const rubric = isDocLike ? docxRubric : pptxRubric;
+      const criterionPrompt = requested.length
+        ? `\n同时核验这些视觉标准：${JSON.stringify(requested)}。在 JSON 中增加 criteria 数组，每项含 criterion、status、evidence。status 为 passed/failed/unverified/not_applicable；只按本页实际证据判断。若某标准同时包含文件属性（如扩展名、总页数、文件名）与视觉要求（如比例、排版、无溢出），文件属性已由程序另行校验，本页只核验视觉部分是否合格，不要因单页图看不到文件格式或全局页数而标 unverified。若某标准要求整份文档/PPT 某处出现特定图示或章节（如架构图、数据表、分工页），不承载该内容的其他页面必须标 not_applicable 并说明原因（不要标 unverified）；无法判断视觉真伪时才用 unverified，禁止无证据通过。每个编号恰好出现一次。`
+        : "";
+      const basePrompt = `${rubric}\n这是第 ${page} 页，共 ${total ?? "未知"} 页${page === total ? "（最后一页）" : ""}。${criterionPrompt}`;
+      const callAndParse = async (promptText: string) => {
+        const raw = parseJSON(
+          await gateway.inspectImage!(promptText, { data: jpeg, mime: "image/jpeg" }, "layout"),
+        );
+        const unwrapped =
+          Array.isArray(raw) && raw.length === 1 && raw[0] && typeof raw[0] === "object"
+            ? raw[0]
+            : raw;
+        return Layout.parse(unwrapped);
+      };
       try {
-        const jpeg = await sharp(await readFile(out)).jpeg({ quality: 85 }).toBuffer();
-        const rubric = isDocLike ? docxRubric : pptxRubric;
-        const criterionPrompt = requested.length
-          ? `\n同时核验这些视觉标准：${JSON.stringify(requested)}。在 JSON 中增加 criteria 数组，每项含 criterion、status、evidence。status 为 passed/failed/unverified/not_applicable；只按本页实际证据判断。不适用于本页的项用 not_applicable 并说明原因，无法判断用 unverified，禁止无证据通过。每个编号恰好出现一次。`
-          : "";
-        const value = Layout.parse(parseJSON(await gateway.inspectImage(
-          `${rubric}\n这是第 ${page} 页，共 ${total ?? "未知"} 页${page === total ? "（最后一页）" : ""}。${criterionPrompt}`,
-          { data: jpeg, mime: "image/jpeg" }, "layout",
-        )));
-        report.checkedPages.push(page);
-        report.checked = report.checkedPages.length;
-        report.issues.push(...value.issues.map((x) => `第 ${page} 页：${x}`));
-        report.suggestions.push(...value.suggestions.map((x) => `第 ${page} 页：${x}`));
-        for (const { criterion } of requested) {
-          const matches = value.criteria?.filter((x) => x.criterion === criterion) || [];
-          const row = matches.length === 1 && matches[0]!.evidence.trim() ? matches[0]! : {
-            criterion, status: "unverified" as const, evidence: "标准缺失、重复或缺少证据",
-          };
-          const prior = observations.get(criterion) || [];
-          prior.push({ ...row, evidence: `第 ${page} 页：${row.evidence}` });
-          observations.set(criterion, prior);
+        try {
+          return { page, value: await callAndParse(basePrompt) };
+        } catch (firstErr) {
+          if (isJobControlError(firstErr) || budgetError(firstErr)) throw firstErr;
+          if (!(firstErr instanceof SyntaxError || firstErr instanceof z.ZodError)) throw firstErr;
+          // 单页偶发 JSON 格式异常时定向重试一次，避免 1/20 页波动浪费整份长文档审查。
+          const retryPrompt = `${basePrompt}\n\n上次返回格式不符合要求，请严格只输出一个 JSON 对象（不要输出数组或额外文字）：{"issues":[],"suggestions":[]${requested.length ? ',"criteria":[{"criterion":0,"status":"passed","evidence":"本页具体视觉依据"}]' : ""}}`;
+          return { page, value: await callAndParse(retryPrompt) };
         }
       } catch (e) {
         if (isJobControlError(e) || budgetError(e)) throw e;
-        report.failedPages.push(page);
-        failures.push(`第 ${page} 页评审失败：${e instanceof Error ? e.message : String(e)}`);
+        return { page, error: `第 ${page} 页评审失败：${e instanceof Error ? e.message : String(e)}` };
+      }
+    };
+
+    const pageResults: Awaited<ReturnType<typeof inspectOne>>[] = new Array(pagesToCheck.length);
+    const concurrency = pagesToCheck.length >= 6 ? 4 : 1;
+    let cursor = 0;
+    let fatalErr: unknown = null;
+    await Promise.all(
+      Array.from({ length: Math.min(concurrency, pagesToCheck.length) }, async () => {
+        while (!fatalErr) {
+          const idx = cursor++;
+          if (idx >= pagesToCheck.length) break;
+          try {
+            pageResults[idx] = await inspectOne(pagesToCheck[idx]!);
+          } catch (e) {
+            fatalErr = e;
+            break;
+          }
+        }
+      }),
+    );
+    if (fatalErr) throw fatalErr;
+
+    for (const res of pageResults) {
+      if (!res) continue;
+      if ("error" in res && res.error) {
+        if (!report.failedPages.includes(res.page)) {
+          report.failedPages.push(res.page);
+          failures.push(res.error);
+        }
+        continue;
+      }
+      const value = res.value!;
+      report.checkedPages.push(res.page);
+      report.checked = report.checkedPages.length;
+      report.issues.push(...value.issues.map((x) => `第 ${res.page} 页：${x}`));
+      report.suggestions.push(...value.suggestions.map((x) => `第 ${res.page} 页：${x}`));
+      for (const { criterion } of requested) {
+        const matches = value.criteria?.filter((x) => x.criterion === criterion) || [];
+        const row = matches.length === 1 && matches[0]!.evidence.trim() ? matches[0]! : {
+          criterion, status: "unverified" as const, evidence: "标准缺失、重复或缺少证据",
+        };
+        const prior = observations.get(criterion) || [];
+        prior.push({ ...row, evidence: `第 ${res.page} 页：${row.evidence}` });
+        observations.set(criterion, prior);
       }
     }
     if (failures.length) throw Error(failures.join("；"));

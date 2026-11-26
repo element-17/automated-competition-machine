@@ -74,6 +74,7 @@ export class Store {
       CREATE TABLE IF NOT EXISTS queue_reviews(competition_id TEXT PRIMARY KEY REFERENCES competitions(id),decision TEXT NOT NULL,reason TEXT NOT NULL,source_url TEXT,quote TEXT,deadline TEXT,reviewer TEXT NOT NULL,reviewed_at TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS queue_review_history(id TEXT PRIMARY KEY,competition_id TEXT NOT NULL,decision TEXT NOT NULL,reason TEXT NOT NULL,source_url TEXT,quote TEXT,deadline TEXT,reviewer TEXT NOT NULL,reviewed_at TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS concept_history(job_id TEXT PRIMARY KEY,competition_id TEXT NOT NULL,title TEXT NOT NULL,audience TEXT NOT NULL DEFAULT '',problem TEXT NOT NULL DEFAULT '',created_at TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS deliveries(id TEXT PRIMARY KEY,job_id TEXT NOT NULL,competition_id TEXT NOT NULL,channel TEXT NOT NULL,status TEXT NOT NULL,target TEXT NOT NULL,files TEXT NOT NULL,summary TEXT NOT NULL,receipt TEXT NOT NULL,created_at TEXT NOT NULL);
     `);
     if (
       !(
@@ -993,6 +994,50 @@ export class Store {
       )
       .run(state, error, now, id, owner, now);
     if (!result.changes) throw Error("队列处理锁已失效，不能更新任务状态");
+  }
+  addDelivery(receipt: {
+    id: string;
+    jobId: string;
+    competitionId: string;
+    channel: string;
+    status: string;
+    target: string;
+    files: string[];
+    summary: string;
+    createdAt: string;
+  }) {
+    this.db
+      .prepare(
+        "INSERT OR REPLACE INTO deliveries(id,job_id,competition_id,channel,status,target,files,summary,receipt,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
+      )
+      .run(
+        receipt.id,
+        receipt.jobId,
+        receipt.competitionId,
+        receipt.channel,
+        receipt.status,
+        receipt.target,
+        JSON.stringify(receipt.files),
+        receipt.summary,
+        JSON.stringify(receipt),
+        receipt.createdAt,
+      );
+  }
+  deliveries(jobId?: string): Record<string, unknown>[] {
+    const rows = (
+      jobId
+        ? this.db
+            .prepare(
+              "SELECT receipt FROM deliveries WHERE job_id=? ORDER BY created_at DESC",
+            )
+            .all(jobId)
+        : this.db
+            .prepare(
+              "SELECT receipt FROM deliveries ORDER BY created_at DESC LIMIT 50",
+            )
+            .all()
+    ) as { receipt: string }[];
+    return rows.map((r) => JSON.parse(r.receipt));
   }
   close() {
     this.db.close();

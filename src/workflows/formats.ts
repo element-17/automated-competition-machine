@@ -31,6 +31,17 @@ export const formatsInQuote = (quote: string) => [
   ...new Set(formatWords.filter(([re]) => re.test(quote)).map(([, f]) => f)),
 ];
 const normalized = (x: string) => x.replace(/\s+/g, " ").trim();
+/** 列表页抓取的标题常夹带日期、通知编号和正文摘录，作为搜索词前先裁净。 */
+export function cleanSearchTitle(raw: string): string {
+  const cleaned = raw
+    .replace(/^\s*\d{4}[.\-/年]\d{1,2}[.\-/月]\d{1,2}日?\s*/g, "")
+    .replace(/【[^】]{2,24}】\s*/g, "")
+    .replace(/\s+一、[\s\S]*$/, "")
+    .replace(/\s*[（(]一[）)][\s\S]*$/, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  return (cleaned || raw.trim()).slice(0, 60);
+}
 
 const Found = z.object({
   items: z
@@ -78,10 +89,11 @@ export async function discoverFormats(
     Record_,
     modelLabel(cfg, "reviewer"),
     async () => {
+      const queryTitle = cleanSearchTitle(brief.title || title);
       const queries = [
-        `${title} 提交 格式 要求`,
-        `${title} 作品 提交 附件 模板`,
-        ...new Set(missing.map((x) => `${title} ${x.d.type} 格式 字数 要求`)),
+        `${queryTitle} 提交 格式 要求`,
+        `${queryTitle} 作品 提交 附件 模板`,
+        ...new Set(missing.map((x) => `${queryTitle} ${x.d.type} 格式 字数 要求`)),
       ].slice(0, 4);
       if (gateway.canSearch !== false) {
         const groups = await Promise.all(

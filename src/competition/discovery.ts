@@ -4,6 +4,7 @@ import { searchSettings, type SearchSettings } from "../core/config.js";
 import type { Store } from "../core/store.js";
 import type { ModelGateway, SearchResult } from "../core/types.js";
 import { searchLogged, fetchDocument } from "./sources.js";
+import type { BrowserFetchOptions } from "./browser-fetcher.js";
 import { z } from "zod";
 import { parseJSON } from "../core/gateway.js";
 import { todayChina } from "./screening.js";
@@ -257,6 +258,7 @@ export async function discoverCompetitions(
   query?: string,
   sources: readonly string[] = [],
   options: Partial<SearchSettings> = {},
+  browserFallback?: BrowserFetchOptions,
 ) {
   const settings = searchSettings({ search: options }),
     year = new Date().getFullYear();
@@ -283,7 +285,7 @@ export async function discoverCompetitions(
   );
   for (const source of sources) {
     try {
-      const page = await fetchDocument(source);
+      const page = await fetchDocument(source, { browserFallback });
       const links = page.links
         .filter((x) => isCompetitionCandidate(x.title))
         .slice(0, 30)
